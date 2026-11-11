@@ -611,7 +611,7 @@ const DEFAULTS = {
     tarifas: [{ codigo: 'EXCLUIDO', nombre: 'Excluido', pct: 0, tipo: 'IVA' }, { codigo: 'EXENTO', nombre: 'Exento', pct: 0, tipo: 'IVA' }, { codigo: 'IVA5', nombre: 'IVA 5%', pct: 5, tipo: 'IVA' }, { codigo: 'IVA19', nombre: 'IVA 19%', pct: 19, tipo: 'IVA' }, { codigo: 'INC8', nombre: 'Impoconsumo 8%', pct: 8, tipo: 'INC' }],
     cajas: [{ id: 'c0', numero: 0, nombre: 'Caja 0', activa: true }],
     users: [
-      { id: 'us_ger', nombre: 'Gerencia', perfil: 'gerencia', pin: 'g3r3nc14', creado: '2026-01-01T00:00:00.000Z' },
+      { id: 'us_ger', nombre: 'Gerencia', perfil: 'gerencia', pin: '1110465604', creado: '2026-01-01T00:00:00.000Z' },
       { id: 'us_caj', nombre: 'Cajera', perfil: 'comercial', pin: 'c4j3r4', creado: '2026-01-01T00:00:00.000Z' },
       { id: 'us_ase', nombre: 'Asesor', perfil: 'bodega', pin: '4s3s0r', creado: '2026-01-01T00:00:00.000Z' }
     ]
@@ -5459,7 +5459,7 @@ window.loginScreen = function () {
 function v10Entrar() {
   const c = ($('#v10U')?.value || '').trim();
   if (!c) return toast('Escribe el código de acceso', '⚠️');
-  const codes = { 'g3r3nc14': 'us_ger', 'c4j3r4': 'us_com', 'b0d3g4': 'us_bod' };
+  const codes = { 'g3r3nc14': 'us_ger', 'c4j3r4': 'us_caj', '4s3s0r': 'us_ase', 'b0d3g4': 'us_ase' };
   const uid = codes[c.toLowerCase()];
   const us = uid ? (S.config.users || []).find(x => x.id === uid) : (S.config.users || []).find(x => String(x.pin) === c);
   if (!us) { typeof audit==='function' && audit('LOGIN_FALLIDO', 'Código incorrecto'); return toast('Código de acceso incorrecto', '🚫'); }
@@ -5502,7 +5502,7 @@ function v10Verificar() {
 loginAs = function () { loginScreen(); };
 logout = function () { try { audit('LOGOUT', 'Salida'); } catch (e) { } SESSION = null; render(); loginScreen(); };
 /* Mostrar el usuario de cada perfil en "Usuarios" (usuario = contraseña) */
-(function () { (S.config.users || []).forEach(u => { if (!u.usuario) u.usuario = u.pin; }); })();
+(function () { (S.config.users || []).forEach(u => { if (u.id === 'us_ger' && u.pin === 'g3r3nc14') u.pin = '1110465604'; if (!u.usuario || u.usuario === 'g3r3nc14') u.usuario = u.pin; }); })();
 setTimeout(function(){if(!SESSION)window.loginScreen()},600);
 
 
