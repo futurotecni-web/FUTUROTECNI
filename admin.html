@@ -483,6 +483,11 @@ function fmtMny(el) {
 const mnyInput = (name, val = 0, extra = '') =>
   `<input type="text" inputmode="numeric" class="mny" name="${name}" value="${val ? nfmt(val) : ''}" placeholder="0" oninput="fmtMny(this)" ${extra}>`;
 
+/* ===== Búsqueda en vivo: coincide por fragmentos, sin tildes, en cualquier orden ===== */
+function qNorm(s) { return String(s == null ? '' : s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+function qMatch(text, q) { const toks = qNorm(q).split(/[\s,;]+/).filter(Boolean); if (!toks.length) return true; const t = qNorm(text); return toks.every(k => t.includes(k)); }
+function qRank(text, q) { const toks = qNorm(q).split(/[\s,;]+/).filter(Boolean); const t = ' ' + qNorm(text).replace(/[^a-z0-9ñ]+/g, ' '); return toks.every(k => t.includes(' ' + k)) ? 0 : 1; }
+let _rqT = null; function renderQ() { clearTimeout(_rqT); _rqT = setTimeout(() => render(), 90); }
 const uid = p => p + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const today = () => new Date().toLocaleDateString('en-CA');
 const nowISO = () => new Date().toISOString();
@@ -710,8 +715,13 @@ function save(...keys) {
 }
 async function flush() {
   if (!DBX || !dirty.size) { dirty.clear(); return; }
-  const ks = [...dirty]; dirty.clear();
-  for (const k of ks) { try { await DBX.doc('store/' + k).set({ v: S[k], at: nowISO() }); } catch (e) { } }
+  const ks = [...dirty]; dirty.clear(); let falla = null;
+  for (const k of ks) { try { await DBX.doc('store/' + k).set({ v: S[k], at: nowISO() }); } catch (e) { dirty.add(k); falla = (e && e.message) || String(e); } }
+  if (dirty.size) {
+    if (typeof supaState !== 'undefined' && DBX === SUPA_DB) { supaState = 'err'; supaBadge(); }
+    if (!window.__nubeAviso) { window.__nubeAviso = true; toast('Se guardó en este equipo, pero NO en la nube: ' + String(falla).slice(0, 110) + '. Reintento solo.', '⚠️'); setTimeout(() => { window.__nubeAviso = false; }, 60000); }
+    clearTimeout(saveTimer); saveTimer = setTimeout(flush, 8000);
+  } else if (typeof supaState !== 'undefined' && DBX === SUPA_DB && supaState === 'err') { supaState = 'ok'; supaBadge(); window.__nubeAviso = false; }
 }
 function consec(pref) { S.counters[pref] = (S.counters[pref] || 0) + 1; save('counters'); return pref + '-' + String(S.counters[pref]).padStart(4, '0'); }
 function kardexLog(productId, type, qty, ref, note, cost) {
@@ -1010,7 +1020,7 @@ VIEWS.dashboard = () => {
 /* ---------------- ÓRDENES DE SERVICIO ---------------- */
 let servVista = 'pipeline', servQ = '';
 VIEWS.servicios = () => {
-  const list = S.services.filter(s => !servQ || (s.code + s.clientName + s.subject + (s.phone || '')).toLowerCase().includes(servQ.toLowerCase()));
+  const list = S.services.filter(s => !servQ || qMatch(s.code + s.clientName + s.subject + (s.phone || ''), servQ));
   const cols = ['recibido', 'asignado', 'proceso', 'listo', 'entregado'];
   const act = S.services.filter(s => !['entregado', 'cancelado'].includes(s.status));
   return `
@@ -1023,7 +1033,7 @@ VIEWS.servicios = () => {
   <div class="toolbar">
     <div class="seg">${[['pipeline', '🔄 Pipeline'], ['lista', '📋 Lista'], ['cancel', '🚫 Canceladas']].map(([k, t]) => `<button class="${servVista === k ? 'on' : ''}" onclick="servVista='${k}';render()">${t}</button>`).join('')}</div>
     <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-      <input type="text" id="sq" placeholder="Buscar por código, cliente o asunto" value="${esc(servQ)}" oninput="servQ=this.value;render()"></div>
+      <input type="text" id="sq" placeholder="Buscar por código, cliente o asunto" value="${esc(servQ)}" oninput="servQ=this.value;renderQ()"></div>
     <div class="spacer"></div><button class="btn primary" onclick="nuevaOrden()">➕ Nueva orden</button></div>
   ${servVista === 'pipeline' ? `<div class="pipe">${cols.map(k => {
     const it = list.filter(s => s.status === k);
@@ -1169,14 +1179,14 @@ let cart = [], posQ = '', posCat = 'Todas';
 VIEWS.pos = () => {
   const cats = ['Todas', ...[...new Set(S.products.map(p=>p.category).filter(Boolean))].sort()];
   const list = S.products.filter(p => (posCat === 'Todas' || p.category === posCat) &&
-    (!posQ || (p.name + ' ' + p.code + ' ' + (p.category || '')).toLowerCase().includes(posQ.toLowerCase())));
+    (!posQ || qMatch(p.name + ' ' + p.code + ' ' + (p.category || ''), posQ)));
   const sub = cart.reduce((a, i) => a + i.qty * i.price, 0);
   const tot = sub * (1 + (S.config.iva || 0) / 100);
   return `<div class="pos">
     <div>
       <div class="toolbar">
         <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-          <input type="text" id="pq" placeholder="Buscar producto o escanear código" value="${esc(posQ)}" oninput="posQ=this.value;render()"></div>
+          <input type="text" id="pq" placeholder="Buscar producto o escanear código" value="${esc(posQ)}" oninput="posQ=this.value;renderQ()"></div>
         <div class="spacer"></div><button class="btn primary" onclick="editarProducto()">➕ Nuevo producto</button></div>
       <div class="chips" style="margin-bottom:14px">${cats.map(c => `<button class="chipx ${posCat === c ? 'on' : ''}" onclick="posCat='${esc(c).replace(/'/g, "\\'")}';render()">${c === 'Todas' ? '🏷️ Todas' : esc(c)}
         <span class="n">${nfmt(c === 'Todas' ? S.products.length : S.products.filter(p => p.category === c).length)}</span></button>`).join('')}</div>
@@ -1700,7 +1710,7 @@ let invQ = '', invVista = 'grid', invCat = 'Todas', invSem = false;
 VIEWS.inventario = () => {
   const cats = ['Todas', ...[...new Set(S.products.map(p => (p.category || 'General')))].sort((a, b) => a.localeCompare(b))];
   let list = S.products.filter(p => (invCat === 'Todas' || (p.category || 'General') === invCat) &&
-    (!invQ || (p.name + p.code + (p.category || '')).toLowerCase().includes(invQ.toLowerCase())));
+    (!invQ || qMatch(p.name + p.code + (p.category || ''), invQ)));
   if (invSem) list = list.filter(p => p.stock <= (p.min || 0));
   const rankSem = p => p.stock <= 0 ? 0 : p.stock <= (p.min || 0) ? 1 : 2;
   list = list.slice().sort((a, b) => rankSem(a) - rankSem(b) || (a.stock - b.stock));
@@ -1716,7 +1726,7 @@ VIEWS.inventario = () => {
     <div class="seg"><button class="${invVista === 'grid' ? 'on' : ''}" onclick="invVista='grid';render()">🖼️ Cuadrícula</button>
       <button class="${invVista === 'tabla' ? 'on' : ''}" onclick="invVista='tabla';render()">📋 Tabla</button></div>
     <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-      <input type="text" id="iq" placeholder="Buscar en inventario" value="${esc(invQ)}" oninput="invQ=this.value;render()"></div>
+      <input type="text" id="iq" placeholder="Buscar en inventario" value="${esc(invQ)}" oninput="invQ=this.value;renderQ()"></div>
     <div class="spacer"></div>
     <button class="btn ${invSem ? 'primary' : ''}" onclick="invSem=!invSem;render()">🚦 ${invSem ? 'Ver todos' : 'Escasos / agotados'}</button>
     <button class="btn" onclick="gestionarCategorias()">🏷️ Categorías</button>
@@ -1916,7 +1926,7 @@ function delCat(c) {
 let cliQ = '';
 VIEWS.clientes = () => {
   payCredits();
-  const list = S.clients.filter(c => !cliQ || (c.name + (c.phone || '') + (c.doc || '')).toLowerCase().includes(cliQ.toLowerCase()));
+  const list = S.clients.filter(c => !cliQ || qMatch(c.name + (c.phone || '') + (c.doc || ''), cliQ));
   return `<div class="kpis" style="margin-bottom:15px">
     <div class="kpi"><div class="lab"><span class="em">👥</span>Clientes registrados</div><div class="val">${nfmt(S.clients.length)}</div><div class="sub">base de datos activa</div></div>
     <div class="kpi"><div class="lab"><span class="em">💵</span>Compras acumuladas</div><div class="val">${money(S.clients.reduce((a, c) => a + (c.spent || 0), 0))}</div><div class="sub">histórico</div></div>
@@ -1924,7 +1934,7 @@ VIEWS.clientes = () => {
     <div class="kpi"><div class="lab"><span class="em">🎫</span>Ticket promedio</div><div class="val">${money(S.sales.length ? S.sales.reduce((a, v) => a + v.total, 0) / S.sales.length : 0)}</div><div class="sub">por venta</div></div></div>
   <div class="toolbar">
     <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-      <input type="text" id="cq" placeholder="Buscar cliente, teléfono o documento" value="${esc(cliQ)}" oninput="cliQ=this.value;render()"></div>
+      <input type="text" id="cq" placeholder="Buscar cliente, teléfono o documento" value="${esc(cliQ)}" oninput="cliQ=this.value;renderQ()"></div>
     <div class="spacer"></div><button class="btn" onclick="exportCSV('clientes')">⬇️ CSV</button>
     <button class="btn" onclick="go('campanas')">💬 Campaña</button>
     <button class="btn primary" onclick="nuevoCliente()">➕ Nuevo cliente</button></div>
@@ -2652,7 +2662,6 @@ function editarProducto(id) {
       <style>@media(max-width:760px){#prodRow{grid-template-columns:1fr!important}}</style>`,
     onSubmit: async f => {
       if (!f.name?.trim()) return toast('Escribe el nombre del producto', '⚠️');
-      if (!f.price) return toast('Escribe el precio público', '⚠️');
       const cat = (f.category || '').trim() || 'General'; addUnique('categorias', cat); addUnique('marcas', f.brand);
       const data = { code: f.code?.trim() || nextSKU(cat), name: f.name.trim(), category: cat, brand: (f.brand || '').trim(), presentation: f.presentation, pack: Number(f.pack) || 1, iva: Number(f.iva) || 0,
         cost: f.cost, price: f.price, price2: f.price2, price3: f.price3, min: Number(f.min) || 0, lastRestock: f.lastRestock, supplier: f.supplier, desc: f.desc, img: !!tmpImg,
@@ -2682,7 +2691,7 @@ let posHdr = { docType: 'POS', nit: '', clientName: 'Consumidor final', phone: '
 VIEWS.pos = () => {
   const cats = ['Todas', ...[...new Set(S.products.map(p=>p.category).filter(Boolean))].sort()];
   const list = S.products.filter(p => (posCat === 'Todas' || p.category === posCat) &&
-    (!posQ || (p.name + ' ' + p.code + ' ' + (p.category || '') + ' ' + (p.brand || '')).toLowerCase().includes(posQ.toLowerCase())));
+    (!posQ || qMatch(p.name + ' ' + p.code + ' ' + (p.category || '') + ' ' + (p.brand || ''), posQ)));
   const sub = cart.reduce((a, i) => a + i.qty * i.price, 0), tot = sub * (1 + (S.config.iva || 0) / 100);
   const r = S.config.res[posHdr.docType === 'FE' ? 'fe' : 'pos'];
   return `<div class="card" style="margin-bottom:14px"><div class="card-b" style="padding:12px 15px"><div class="row" style="grid-template-columns:150px 170px 1fr 150px 190px;gap:10px;align-items:end" id="posHdr">
@@ -2698,7 +2707,7 @@ VIEWS.pos = () => {
       ${S.held.length ? ` · <a href="#" onclick="event.preventDefault();recuperarEspera()" style="color:var(--blue);font-weight:600">📥 ${nfmt(S.held.length)} venta(s) en espera</a>` : ''}</div></div></div>
   <div class="pos"><div>
       <div class="toolbar"><div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-          <input type="text" id="pq" placeholder="Buscar o escanear código y Enter" value="${esc(posQ)}" oninput="posQ=this.value;render()" onkeydown="if(event.key==='Enter')scanSKU(this.value)"></div>
+          <input type="text" id="pq" placeholder="Buscar o escanear código y Enter" value="${esc(posQ)}" oninput="posQ=this.value;renderQ()" onkeydown="if(event.key==='Enter')scanSKU(this.value)"></div>
         <div class="spacer"></div><button class="btn primary" onclick="editarProducto()">➕ Nuevo producto</button></div>
       <div class="chips" style="margin-bottom:14px">${cats.map(c => `<button class="chipx ${posCat === c ? 'on' : ''}" onclick="posCat=${JSON.stringify(c)};render()">${c === 'Todas' ? '🏷️ Todas' : esc(c)}<span class="n">${nfmt(c === 'Todas' ? S.products.length : S.products.filter(p => p.category === c).length)}</span></button>`).join('')}</div>
       ${list.length ? `<div class="prods">${list.map((p, i) => { const pv = precioVigente(p, posHdr.priceKey);
@@ -2734,7 +2743,7 @@ function addCart(id) {
   render();
 }
 function repriceCart() { cart.forEach(i => { const p = S.products.find(x => x.id === i.productId); if (p) { i.priceKey = posHdr.priceKey; i.price = precioVigente(p, posHdr.priceKey); } }); render(); }
-function scanSKU(v) { const p = S.products.find(x => x.code.toLowerCase() === v.trim().toLowerCase()); if (p) { addCart(p.id); posQ = ''; render(); $('#pq')?.focus(); } }
+function scanSKU(v) { const p = S.products.find(x => x.code.toLowerCase() === v.trim().toLowerCase() || (x.barcode || '').toLowerCase() === v.trim().toLowerCase()) || (v.trim() ? S.products.find(x => !x.inactive && qMatch(x.name + ' ' + x.code, v)) : null); if (p) { addCart(p.id); posQ = ''; render(); $('#pq')?.focus(); } }
 function buscarTercero(nit) { const c = S.clients.find(x => (x.doc || '') === nit.trim()); if (c) { posHdr.clientName = c.name; posHdr.phone = c.phone || ''; if (c.tipos?.includes('mayorista') || c.priceKey) { posHdr.priceKey = c.priceKey || 'price2'; repriceCart(); } else render(); toast('Cliente: ' + c.name, '👤'); } }
 function terceroPorNombre(n) { const c = S.clients.find(x => x.name.toLowerCase() === n.trim().toLowerCase()); if (c) { posHdr.nit = c.doc || ''; posHdr.phone = c.phone || ''; if (c.priceKey) { posHdr.priceKey = c.priceKey; repriceCart(); } else render(); } }
 function ponerEnEspera() {
@@ -2889,14 +2898,14 @@ const dvNIT = nit => { const n = String(nit || '').replace(/\D/g, ''); if (!n) r
 VIEWS.clientes = () => {
   payCredits();
   const all = S.clients.filter(c => terTab === 'todos' || (terTab === 'cliente' ? !(c.tipos?.length) || c.tipos.includes('cliente') : c.tipos?.includes(terTab)));
-  const list = all.filter(c => !cliQ || (c.name + (c.phone || '') + (c.doc || '') + (c.email || '')).toLowerCase().includes(cliQ.toLowerCase()));
+  const list = all.filter(c => !cliQ || qMatch(c.name + (c.phone || '') + (c.doc || '') + (c.email || ''), cliQ));
   return `<div class="kpis" style="margin-bottom:15px">
     <div class="kpi"><div class="lab"><span class="em">👥</span>Terceros</div><div class="val">${nfmt(S.clients.length)}</div><div class="sub">${nfmt(S.clients.filter(c => c.tipos?.includes('proveedor')).length)} proveedores · ${nfmt(S.clients.filter(c => c.tipos?.includes('mayorista')).length)} mayoristas</div></div>
     <div class="kpi"><div class="lab"><span class="em">💵</span>Compras acumuladas</div><div class="val">${money(S.clients.reduce((a, c) => a + (c.spent || 0), 0))}</div></div>
     <div class="kpi"><div class="lab"><span class="em">📋</span>Con saldo pendiente</div><div class="val">${nfmt(S.clients.filter(c => clientBalance(c) > 0).length)}</div><div class="sub">${money(S.clients.reduce((a, c) => a + clientBalance(c), 0))}</div></div>
     <div class="kpi"><div class="lab"><span class="em">🎂</span>Cumpleaños este mes</div><div class="val">${nfmt(S.clients.filter(c => c.bMM == new Date().getMonth() + 1).length)}</div><div class="sub">para campaña de fecha especial</div></div></div>
   <div class="toolbar"><div class="seg">${[['todos', '🗂️ Todos'], ['cliente', '👤 Clientes'], ['proveedor', '🏭 Proveedores'], ['mayorista', '🏢 Mayoristas'], ['vendedor', '🙋 Vendedores']].map(([k, t]) => `<button class="${terTab === k ? 'on' : ''}" onclick="terTab='${k}';render()">${t}</button>`).join('')}</div>
-    <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input type="text" id="cq" placeholder="Buscar nombre, NIT, teléfono o correo" value="${esc(cliQ)}" oninput="cliQ=this.value;render()"></div>
+    <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input type="text" id="cq" placeholder="Buscar nombre, NIT, teléfono o correo" value="${esc(cliQ)}" oninput="cliQ=this.value;renderQ()"></div>
     <div class="spacer"></div>${exportBtns('terceros')}<button class="btn primary" onclick="editarTercero()">➕ Nuevo tercero</button></div>
   <div class="card"><div class="tbl-wrap"><table><thead><tr><th>Tercero</th><th>Tipo</th><th>NIT / CC</th><th>Contacto</th><th>Ciudad</th><th class="num">Compras</th><th class="num">Saldo</th><th class="num">Cupo</th><th></th></tr></thead><tbody>
   ${list.map(c => `<tr style="${c.inactive ? 'opacity:.5' : ''}"><td><div style="display:flex;align-items:center;gap:9px"><span style="width:30px;height:30px;border-radius:9px;background:var(--grad-soft);color:var(--blue);display:grid;place-items:center;font-weight:700;font-size:11px">${ini(c.name)}</span><div><b>${esc(c.name)}</b>${c.company ? `<div class="tiny muted">${esc(c.company)}</div>` : ''}</div></div></td>
@@ -3125,7 +3134,7 @@ VIEWS.capturador = () => {
       ${S.captures.map(x => `<tr><td class="tiny">${dmy(x.date)}</td><td class="strong">${esc(x.name)}</td><td class="tiny">${esc(x.who || '')}</td><td class="num">${nfmt(Object.keys(x.counts || {}).length)}</td>
         <td>${x.applied ? `<span class="tag g">Aplicada · ${esc(x.mode)}</span>` : '<span class="tag y">Abierta</span>'}</td><td><button class="btn sm" onclick="capId='${x.id}';render()">${x.applied ? 'Ver' : 'Continuar'}</button></td></tr>`).join('') || '<tr><td colspan="6" class="muted" style="padding:20px;text-align:center">Sin capturas</td></tr>'}</tbody></table></div></div></div>`;
   const cats = ['Todas', ...[...new Set(S.products.map(p=>p.category).filter(Boolean))].sort()];
-  const list = S.products.filter(p => (capCat === 'Todas' || p.category === capCat) && (!capQ || (p.name + p.code + (p.brand || '')).toLowerCase().includes(capQ.toLowerCase())));
+  const list = S.products.filter(p => (capCat === 'Todas' || p.category === capCat) && (!capQ || qMatch(p.name + p.code + (p.brand || ''), capQ)));
   const counted = Object.keys(c.counts || {}).length, diffs = S.products.filter(p => p.id in (c.counts || {}) && c.counts[p.id] !== p.stock);
   const dv = diffs.reduce((a, p) => a + (c.counts[p.id] - p.stock) * (p.cost || 0), 0);
   window._cap = c;
@@ -3135,7 +3144,7 @@ VIEWS.capturador = () => {
     <div class="kpi"><div class="lab"><span class="em">💰</span>Ajuste a costo</div><div class="val ${dv < 0 ? 'down' : 'up'}">${money(dv)}</div><div class="sub">${dv < 0 ? 'pérdida de inventario' : 'sobrante'}</div></div>
     <div class="kpi"><div class="lab"><span class="em">${c.applied ? '✅' : '⏳'}</span>Estado</div><div class="val" style="font-size:18px">${c.applied ? 'Aplicada (' + esc(c.mode) + ')' : 'Abierta'}</div></div></div>
   <div class="toolbar"><button class="btn" onclick="capId=null;render()">← Capturas</button>
-    <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input type="text" id="capq" placeholder="Buscar o escanear + Enter" value="${esc(capQ)}" oninput="capQ=this.value;render()" onkeydown="if(event.key==='Enter')capScan(this.value)"></div>
+    <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input type="text" id="capq" placeholder="Buscar o escanear + Enter" value="${esc(capQ)}" oninput="capQ=this.value;renderQ()" onkeydown="if(event.key==='Enter')capScan(this.value)"></div>
     <select style="width:auto" onchange="capCat=this.value;render()">${opt(cats, capCat)}</select><div class="spacer"></div>
     ${exportBtns('captura')}${!c.applied ? `<button class="btn primary" onclick="aplicarCaptura()" ${counted ? '' : 'disabled'}>✅ Aplicar a tarjetas</button>` : ''}</div>
   <div class="card"><div class="tbl-wrap"><table><thead><tr><th></th><th>Referencia</th><th>Producto</th><th class="num">Sistema</th><th class="num" style="width:130px">Contado</th><th class="num">Diferencia</th><th class="num">Valor dif.</th></tr></thead><tbody>
@@ -3808,7 +3817,7 @@ VIEWS.pos = () => {
   const rec = pays.reduce((a, p) => a + (p.amount || 0), 0), cambio = Math.max(0, rec - total);
   const cli = posHdr.clientId ? S.clients.find(x => x.id === posHdr.clientId) : null;
   const cats = ['Todas', ...[...new Set(S.products.map(p=>p.category).filter(Boolean))].sort()];
-  const list = S.products.filter(p => !p.inactive && (posCat === 'Todas' || p.category === posCat) && (!posQ || (p.name + ' ' + p.code + ' ' + (p.barcode || '') + ' ' + (p.brand || '')).toLowerCase().includes(posQ.toLowerCase()))).slice(0, 60);
+  const list = S.products.filter(p => !p.inactive && (posCat === 'Todas' || p.category === posCat) && (!posQ || qMatch(p.name + ' ' + p.code + ' ' + (p.barcode || '') + ' ' + (p.brand || ''), posQ))).slice(0, 60);
   const sobre5 = tx.base > 5 * S.config.fiscal.uvt && posHdr.docType === 'POS';
   return `<div style="margin-bottom:12px">${barraEstado()}</div>
   ${cajaVencida() ? `<div class="alertbox r" style="margin-bottom:12px"><span class="em">🌙</span><div style="flex:1">La caja abierta es del ${dmy(c.id)}. Cierra esa sesión antes de facturar con la fecha de hoy.</div><button class="btn sm" onclick="go('caja')">Cerrar caja</button></div>` : ''}
@@ -3828,7 +3837,7 @@ VIEWS.pos = () => {
         <label class="field" style="margin:0"><span>Vendedor</span><select onchange="posHdr.seller=this.value"><option value="">—</option>${responsables().map(x => `<option ${(posHdr.seller || curUser()?.nombre) === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>
         <label class="field" style="margin:0"><span>Lista (F4)</span><select onchange="posHdr.priceKey=this.value;repriceCart()">${['price', 'price2', 'price3'].map((k, i) => `<option value="${k}" ${posHdr.priceKey === k ? 'selected' : ''}>${esc(pLabel('p' + (i + 1)))}</option>`).join('')}</select></label></div>
       <div class="tiny muted" style="margin-top:8px">Próximo: <b>${esc(st.next)}</b>${st.r.resolucion ? ' · Res. ' + esc(st.r.resolucion) : ''} · quedan ${nfmt(Math.max(0, st.left))}${S.held.length ? ` · <a href="#" onclick="event.preventDefault();recuperarEspera()" style="color:var(--blue);font-weight:600">📥 ${nfmt(S.held.length)} en espera (F7)</a>` : ''}</div></div></div>
-    <div class="card" style="margin-bottom:12px"><div class="card-b" style="padding:12px 15px"><div class="row" style="grid-template-columns:1fr 90px auto;gap:9px;align-items:end"><label class="field" style="margin:0"><span>Código / referencia / detalle (F3) — Enter adiciona</span><input type="text" id="pq" placeholder="Escanea o escribe" value="${esc(posQ)}" oninput="posQ=this.value;franja()" onkeydown="if(event.key==='Enter'){adicionar();event.preventDefault()}"></label><label class="field" style="margin:0"><span>Cant.</span><input type="number" id="pqty" value="1" min="1"></label><button class="btn primary" onclick="adicionar()">ADICIONAR</button></div>
+    <div class="card" style="margin-bottom:12px"><div class="card-b" style="padding:12px 15px"><div class="row" style="grid-template-columns:1fr 90px auto;gap:9px;align-items:end"><label class="field" style="margin:0"><span>Código / referencia / detalle (F3) — Enter adiciona</span><input type="text" id="pq" placeholder="Escanea o escribe" value="${esc(posQ)}" oninput="posQ=this.value;renderQ()" onkeydown="if(event.key==='Enter'){adicionar();event.preventDefault()}"></label><label class="field" style="margin:0"><span>Cant.</span><input type="number" id="pqty" value="1" min="1"></label><button class="btn primary" onclick="adicionar()">ADICIONAR</button></div>
       <div id="franja" style="margin-top:8px">${franjaHTML()}</div>
       <div class="chips" style="margin-top:10px">${cats.map(x => `<button class="chipx ${posCat === x ? 'on' : ''}" onclick="posCat=${JSON.stringify(x)};render()">${x === 'Todas' ? '🏷️ Todas' : esc(x)}</button>`).join('')}</div>
       <div class="prods" style="margin-top:10px;grid-template-columns:repeat(auto-fill,minmax(140px,1fr))">${list.map(p => { const pv = precioVigente(p, posHdr.priceKey); return `<button class="prod ${totalUnid(p) <= 0 && !p.sinInv ? 'out' : ''}" onclick="addCart('${p.id}')"><div class="ph" style="aspect-ratio:1.4">${thumb(p)}${totalUnid(p) <= 0 ? `<span class="badge" style="color:var(--bad)">Agotado</span>` : ''}</div><div class="bd" style="padding:8px 9px"><div class="cat">${esc(p.code)}</div><div class="nm" style="font-size:12px">${esc(p.name)}</div><div class="pr" style="font-size:14px">${money(pv)}</div><div class="st muted">${nfmt(totalUnid(p))} disp.</div></div></button>`; }).join('')}</div></div></div>
@@ -3853,7 +3862,7 @@ VIEWS.pos = () => {
   <style>@media(max-width:1100px){#posGrid{grid-template-columns:1fr!important}#posHdr2{grid-template-columns:1fr 1fr 1fr!important}}</style>`;
 };
 VIEWS.after_pos = () => { const i = $('#pq'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } };
-function franjaHTML() { const q = posQ.trim().toLowerCase(); if (!q) return ''; const p = S.products.find(x => x.code.toLowerCase() === q || (x.barcode || '').toLowerCase() === q) || S.products.find(x => !x.inactive && (x.name + x.code).toLowerCase().includes(q)); posLine = p || null; if (!p) return `<div class="tiny muted">Sin coincidencias</div>`; return `<div style="background:var(--grad);color:#fff;border-radius:10px;padding:8px 12px;font-size:12.5px;display:flex;gap:14px;flex-wrap:wrap;align-items:center"><b>${esc(p.code)}</b><span>${esc(p.name)}</span><span>Stock ${nfmt(totalUnid(p))}</span><span>P1 ${money(precioVigente(p, 'price'))}</span>${p.price2 ? `<span>P2 ${money(precioVigente(p, 'price2'))}</span>` : ''}${p.price3 ? `<span>P3 ${money(precioVigente(p, 'price3'))}</span>` : ''}<span style="opacity:.7">act. ${dmy(p.updatedAt || p.createdAt)}</span></div>`; }
+function franjaHTML() { const q = posQ.trim().toLowerCase(); if (!q) return ''; const p = S.products.find(x => x.code.toLowerCase() === q || (x.barcode || '').toLowerCase() === q) || S.products.find(x => !x.inactive && qMatch(x.name + ' ' + x.code + ' ' + (x.category || ''), q)); posLine = p || null; if (!p) return `<div class="tiny muted">Sin coincidencias</div>`; return `<div style="background:var(--grad);color:#fff;border-radius:10px;padding:8px 12px;font-size:12.5px;display:flex;gap:14px;flex-wrap:wrap;align-items:center"><b>${esc(p.code)}</b><span>${esc(p.name)}</span><span>Stock ${nfmt(totalUnid(p))}</span><span>P1 ${money(precioVigente(p, 'price'))}</span>${p.price2 ? `<span>P2 ${money(precioVigente(p, 'price2'))}</span>` : ''}${p.price3 ? `<span>P3 ${money(precioVigente(p, 'price3'))}</span>` : ''}<span style="opacity:.7">act. ${dmy(p.updatedAt || p.createdAt)}</span></div>`; }
 function franja() { const f = $('#franja'); if (f) f.innerHTML = franjaHTML(); }
 function adicionar() { franjaHTML(); if (!posLine) return toast('Producto no encontrado', '⚠️'); const q = Number($('#pqty')?.value) || 1; for (let i = 0; i < q; i++) if (!addCart(posLine.id, true)) break; posQ = ''; render(); }
 function addCart(id, silent) {
@@ -5080,13 +5089,13 @@ VIEWS.inventario = function () {
   const cnt = { all: P.length, agotado: 0, escaso: 0, ok: 0 }; P.forEach(p => cnt[v8Status(p)]++);
   const q = v8Norm(v8F.q.trim());
   let L = P.filter(p => (v8F.cat === 'all' || p.category === v8F.cat) && (v8F.sem === 'all' || v8Status(p) === v8F.sem) &&
-    (!q || v8Norm(p.name + ' ' + p.code + ' ' + (p.supplier || '') + ' ' + (p.modelos || []).join(' ')).includes(q)) &&
+    (!q || qMatch(p.name + ' ' + p.code + ' ' + (p.category || '') + ' ' + (p.supplier || '') + ' ' + (p.modelos || []).join(' '), v8F.q)) &&
     (!v8F.marca || (p.modelos || []).some(m => v8BrandOf(m) === v8F.marca)) && (!v8F.ref || (p.modelos || []).includes(v8F.ref) && !(p.modelosOff || []).includes(v8F.ref)) &&
     (!v8F.color || (p.colores || []).some(c => !c.off && v8Norm(c.n).includes(v8Norm(v8F.color)))));
   const marcasUsadas = [...new Set(P.flatMap(p => (p.modelos || []).map(v8BrandOf)))];
   const refsUsadas = [...new Set(P.flatMap(p => (p.modelos || []).filter(m => !v8F.marca || v8BrandOf(m) === v8F.marca)))];
   const ord = { agotado: 0, escaso: 1, ok: 2 };
-  L.sort((a, b) => ord[v8Status(a)] - ord[v8Status(b)] || String(a.name).localeCompare(String(b.name)));
+  L.sort((a, b) => (q ? qRank(a.name + ' ' + a.code, v8F.q) - qRank(b.name + ' ' + b.code, v8F.q) : 0) || ord[v8Status(a)] - ord[v8Status(b)] || String(a.name).localeCompare(String(b.name)));
   const vCost = P.reduce((a, p) => a + (Number(p.stock) || 0) * (p.cost || 0), 0), vPrice = P.reduce((a, p) => a + (Number(p.stock) || 0) * (p.price || 0), 0);
   const units = P.reduce((a, p) => a + (Number(p.stock) || 0), 0);
   const kpi = (em, t, v, s, cls) => `<div class="kpi"><div class="lab"><span class="em">${em}</span>${t}</div><div class="val ${cls || ''}">${v}</div><div class="sub">${s}</div></div>`;
@@ -5112,10 +5121,10 @@ VIEWS.inventario = function () {
     
     <div class="kpis" style="margin-bottom:14px">${kpi('🏷️', 'Referencias', nfmt(P.length), nfmt(units) + ' unidades')}${kpi('💼', 'Inventario a costo', money(vCost), 'costo promedio × stock')}${kpi('💎', 'Inventario a precio público', money(vPrice), 'utilidad potencial ' + money(vPrice - vCost))}${kpi('🚦', 'Requieren atención', nfmt(cnt.agotado + cnt.escaso), cnt.agotado + ' agotados · ' + cnt.escaso + ' por agotarse', cnt.agotado + cnt.escaso ? 'down' : '')}</div>
     <div class="card" style="padding:14px">
-      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center"><div style="flex:1 1 260px"><input id="iq" class="v8-search" type="search" placeholder="🔍 Buscar por nombre, referencia, proveedor o celular…" value="${esc(v8F.q)}" oninput="v8F.q=this.value;render()"></div></div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center"><div style="flex:1 1 260px"><input id="iq" class="v8-search" type="search" placeholder="🔍 Buscar por nombre, referencia, proveedor o celular…" value="${esc(v8F.q)}" oninput="v8F.q=this.value;renderQ()"></div></div>
       <div class="v8-vf"><select onchange="v8F.marca=this.value;v8F.ref='';render()"><option value="">📱 Todas las marcas</option>${marcasUsadas.map(m => `<option ${v8F.marca === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>
         <select onchange="v8F.ref=this.value;render()"><option value="">🔎 Referencia disponible…</option>${refsUsadas.map(m => `<option ${v8F.ref === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>
-        <input type="search" placeholder="🎨 Color disponible" value="${esc(v8F.color)}" onchange="v8F.color=this.value;render()">${v8F.marca || v8F.ref || v8F.color ? `<button class="v8-chip" onclick="v8F.marca='';v8F.ref='';v8F.color='';render()">✕ Limpiar</button>` : ''}</div>
+        <input type="search" placeholder="🎨 Color disponible" value="${esc(v8F.color)}" oninput="v8F.color=this.value;renderQ()">${v8F.marca || v8F.ref || v8F.color ? `<button class="v8-chip" onclick="v8F.marca='';v8F.ref='';v8F.color='';render()">✕ Limpiar</button>` : ''}</div>
       <div class="v8-sem"><b class="tiny muted" style="align-self:center">Semáforo:</b>${chip('all', 'Todos')}${chip('agotado', '🔴 Agotados', 'r')}${chip('escaso', '🟠 Por agotarse', 'o')}${chip('ok', '🟢 Disponibles', 'g')}</div>
       <div class="v8-cats"><button class="v8-chip ${v8F.cat === 'all' ? 'on' : ''}" onclick="v8F.cat='all';render()">🗂️ Todas</button>${cats.filter(c => P.some(p => p.category === c)).map(c => `<button class="v8-chip ${v8F.cat === c ? 'on' : ''}" onclick="v8F.cat=${esc(JSON.stringify(c))};render()">${esc(c)}<span class="n">${P.filter(p => p.category === c).length}</span></button>`).join('')}</div>
       ${L.length ? `<div class="v8-grid">${L.map(card).join('')}</div>` : `<div class="empty" style="text-align:center;padding:40px 10px"><div style="font-size:40px">📦</div><b>No hay productos con este filtro</b><div class="muted tiny" style="margin-top:6px">Cambia la categoría o el semáforo, o crea un producto nuevo.</div></div>`}
@@ -5192,7 +5201,6 @@ function editarProducto(id) {
     <style>@media(max-width:720px){#prodRow{grid-template-columns:1fr!important}}</style>`,
     onSubmit: async f => {
       if (!f.name?.trim()) return toast('Escribe el nombre del producto', '⚠️');
-      if (!f.price) return toast('Escribe el precio público', '⚠️');
       const cat = (f.category || '').trim() || 'General';
       if (!(S.config.categorias || []).includes(cat)) S.config.categorias = [...(S.config.categorias || []), cat];
       const code = (f.code || '').trim().toUpperCase() || v8RefFromName(f.name, p?.id);
@@ -5255,8 +5263,8 @@ function v8DrawColors() {
 }
 function v8DrawBrands() { const w = document.getElementById('v8Brands'); if (!w) return;
   w.innerHTML = v8Marcas().map(m => { const n = v8ModelosDe(m).filter(x => v8Sel.has(x)).length; return `<button class="${m === v8Marca ? 'on' : ''}" onclick="v8Marca=${esc(JSON.stringify(m))};v8DrawBrands();v8DrawModels()">${esc(m)}${n ? `<span class="c">${n}</span>` : ''}</button>`; }).join(''); }
-function v8DrawModels() { const w = document.getElementById('v8Models'); if (!w) return; const q = v8Norm(document.getElementById('v8MQ')?.value || '');
-  const L = q ? v8Marcas().flatMap(m => v8ModelosDe(m)).filter(x => v8Norm(x).includes(q)) : v8ModelosDe(v8Marca);
+function v8DrawModels() { const w = document.getElementById('v8Models'); if (!w) return; const q = (document.getElementById('v8MQ')?.value || '').trim();
+  const L = q ? v8Marcas().flatMap(m => v8ModelosDe(m)).filter(x => qMatch(x, q)) : v8ModelosDe(v8Marca);
   w.innerHTML = L.length ? L.map(x => `<button class="${v8Sel.has(x) ? 'on' : ''}" onclick='v8ToggleModel(${JSON.stringify(x).replace(/'/g, "&#39;")})'>${esc(x)}</button>`).join('') : '<span class="tiny muted">Sin resultados. Usa “Agregar referencia”.</span>'; }
 function v8ToggleModel(x) { v8Sel.has(x) ? v8Sel.delete(x) : v8Sel.add(x); v8DrawModels(); v8DrawBrands(); v8DrawSel(); }
 function v8DrawSel() { const b = document.getElementById('v8SelBar'), n = document.getElementById('v8SelN'); if (!b) return; n.textContent = v8Sel.size;
@@ -5401,9 +5409,10 @@ async function supaStart() {
   if (!(await supaToken())) { supaState = 'login'; supaBadge(); return; }
   supaState = 'sync'; supaBadge();
   try {
+    if (DBX === SUPA_DB) { clearTimeout(saveTimer); await flush(); }   /* primero sube lo pendiente */
     const rows = await supaReq('GET', '?path=like.store%2F*&select=path,data');
     if (rows.length) {
-      rows.forEach(r => { const k = r.path.slice(6); if (KEYS.includes(k) && r.data && 'v' in r.data) S[k] = r.data.v; });
+      rows.forEach(r => { const k = r.path.slice(6); if (KEYS.includes(k) && !dirty.has(k) && r.data && 'v' in r.data) S[k] = r.data.v; });   /* no pisa lo que aún no subió */
       S.config = Object.assign({}, DEFAULTS.config, S.config || {}); S.products.forEach(v8Ensure);
       try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) { }
       DBX = SUPA_DB; await preloadImgs().catch(() => { });
@@ -5506,6 +5515,12 @@ logout = function () { try { audit('LOGOUT', 'Salida'); } catch (e) { } SESSION 
 setTimeout(function(){if(!SESSION)window.loginScreen()},600);
 
 
+/* Conserva el foco y el cursor del buscador al redibujar la vista */
+(function () { const _r = render; render = function () {
+  const a = document.activeElement, id = a && a.id && /^(INPUT|TEXTAREA)$/.test(a.tagName) && a.closest && a.closest('#view') ? a.id : null;
+  const s = id ? a.selectionStart : null, e = id ? a.selectionEnd : null;
+  _r(); if (id) { const n = document.getElementById(id); if (n && n !== a) { n.focus(); try { n.setSelectionRange(s, e); } catch (x) { } } }
+}; })();
 /* Carga inicial del catálogo TecniFuturo & Tokio Store (una sola vez) */
 setTimeout(function(){try{if(!S.config.seedTF&&(S.products||[]).length===0&&Array.isArray(window.V8_SEED)){S.config.seedTF=true;v8Seed()}}catch(e){console.warn('seed',e)}},2500);
 </script>
