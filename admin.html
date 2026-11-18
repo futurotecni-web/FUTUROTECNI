@@ -5061,7 +5061,7 @@ function v8Sync() {
     const out = {};
     S.products.forEach(p => {
       out[(p.code || p.id).toUpperCase()] = { id: p.id, name: p.name, cat: p.category, price: p.price || 0, stock: p.agotado ? 0 : (Number(p.stock) || 0),
-        hidden: !!p.webHidden, agotado: !!p.agotado, tipo: p.tipo || 'normal', sub: p.sub || '', modelos: p.modelos || [], colores: (p.colores || []).map(c => ({ n: c.n, k: c.k, url: c.url || '', off: !!c.off })), refs: (p.modelos || []).map(n => ({ m: v8BrandOf(n), n, off: (p.modelosOff || []).includes(n) })), img: p.imgUrl || '' };
+        hidden: !!p.webHidden, agotado: !!p.agotado, tipo: p.tipo || 'normal', sub: p.sub || '', modelos: p.modelos || [], colores: (p.colores || []).map(c => ({ n: c.n, k: c.k, url: c.url || '', off: !!c.off })), refs: (p.modelos || []).map(n => ({ m: v8BrandOf(n), n, off: (p.modelosOff || []).includes(n) })), img: p.imgUrl || '', desc: p.desc || '' };
     });
     localStorage.setItem('ep_web_inv', JSON.stringify({ at: nowISO(), items: out }));
   } catch (e) { }
@@ -5420,10 +5420,54 @@ async function supaStart() {
     supaPushCatalog(); supaState = 'ok'; supaBadge(); render(); toast('Datos sincronizados con la nube', '☁️');
   } catch (e) { console.warn(e); supaState = 'err'; supaBadge(); toast('No se pudo conectar con la nube: ' + e.message, '⚠️'); }
 }
-let supaCatT = null;
+let supaCatT = null, supaPubErr = false;
+/* Foto principal del producto (memoria o almacenamiento local) */
+function pubImgOf(p) { let v = IMG[p.id]; if (!v) { try { v = localStorage.getItem('efimg_' + p.id); } catch (e) { } } return v || ''; }
+/* Reduce la foto a ~520px WebP para que la tienda cargue rápido */
+function pubShrink(src) {
+  return new Promise(res => {
+    const im = new Image(); im.onload = () => {
+      try {
+        const M = 520, k = Math.min(1, M / Math.max(im.width, im.height)), c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(im.width * k)); c.height = Math.max(1, Math.round(im.height * k));
+        c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+        let o = c.toDataURL('image/webp', .78); if (!o.startsWith('data:image/webp')) o = c.toDataURL('image/jpeg', .8); res(o);
+      } catch (e) { res(src); }
+    }; im.onerror = () => res(src); im.src = src;
+  });
+}
+const pubSig = s => { let x = 0; for (let i = 0; i < s.length; i += 7) x = (x * 31 + s.charCodeAt(i)) | 0; return s.length + '.' + (x >>> 0).toString(36); };
+function pubFail(e) {
+  supaState = 'err'; supaBadge();
+  if (!supaPubErr) { supaPubErr = true; toast('No se pudo publicar en la tienda: ' + String((e && e.message) || e).slice(0, 100) + '. Reintento solo.', '⚠️'); setTimeout(() => { supaPubErr = false; }, 60000); }
+  clearTimeout(supaCatT); supaCatT = setTimeout(supaPublish, 10000);
+}
+/* Publica catálogo + fotos nuevas/cambiadas en la nube; la tienda las toma sola */
+async function supaPublish() {
+  if (DBX !== SUPA_DB) return;
+  try {
+    const d = JSON.parse(localStorage.getItem('ep_web_inv') || '{}');
+    let done = {}; try { done = JSON.parse(localStorage.getItem('ep_img_pub') || '{}'); } catch (e) { }
+    const items = d.items || {}; const img = {};
+    for (const p of S.products) {
+      const sku = String(p.code || p.id).toUpperCase(), it = items[sku]; if (!it) continue;
+      const raw = pubImgOf(p); if (!raw) { if (done[sku]) { try { await SUPA_DB.doc('public/img/' + sku).delete(); } catch (e) { } delete done[sku]; } continue; }
+      const sig = pubSig(raw); it.imgv = sig;
+      if (done[sku] !== sig) img[sku] = { raw, sig };
+    }
+    for (const sku of Object.keys(img)) {
+      const small = await pubShrink(img[sku].raw);
+      await SUPA_DB.doc('public/img/' + sku).set({ v: small, sig: img[sku].sig });
+      done[sku] = img[sku].sig; try { localStorage.setItem('ep_img_pub', JSON.stringify(done)); } catch (e) { }
+    }
+    d.at = nowISO();
+    await SUPA_DB.doc('public/catalog').set(d);
+    supaPubErr = false; if (supaState === 'err') { supaState = 'ok'; supaBadge(); }
+  } catch (e) { pubFail(e); }
+}
 function supaPushCatalog() {
   if (DBX !== SUPA_DB) return; clearTimeout(supaCatT);
-  supaCatT = setTimeout(() => { try { const d = JSON.parse(localStorage.getItem('ep_web_inv') || '{}'); SUPA_DB.doc('public/catalog').set(d).catch(() => { }); } catch (e) { } }, 800);
+  supaCatT = setTimeout(supaPublish, 800);
 }
 (function () { const _s = v8Sync; v8Sync = function () { _s(); supaPushCatalog(); }; })();
 function supaPanel() {
