@@ -5063,7 +5063,8 @@ function v8Sync() {
       out[(p.code || p.id).toUpperCase()] = { id: p.id, name: p.name, cat: p.category, price: p.price || 0, stock: p.agotado ? 0 : (Number(p.stock) || 0),
         hidden: !!p.webHidden, agotado: !!p.agotado, tipo: p.tipo || 'normal', sub: p.sub || '', modelos: p.modelos || [], colores: (p.colores || []).map(c => ({ n: c.n, k: c.k, url: c.url || '', off: !!c.off })), refs: (p.modelos || []).map(n => ({ m: v8BrandOf(n), n, off: (p.modelosOff || []).includes(n) })), img: p.imgUrl || '', desc: p.desc || '' };
     });
-    localStorage.setItem('ep_web_inv', JSON.stringify({ at: nowISO(), items: out }));
+    window.__webInv = { at: nowISO(), items: out };
+    try { localStorage.setItem('ep_web_inv', JSON.stringify(window.__webInv)); } catch (e) { }
   } catch (e) { }
 }
 
@@ -5430,7 +5431,7 @@ async function supaStart(silent) {
     supaState = 'ok'; supaBadge();
     if (silent) { if (before !== JSON.stringify(S.products) + JSON.stringify(S.clients || []) + JSON.stringify(S.kardex || [])) { render(); toast('Se actualizó con cambios de otro equipo', '☁️'); } }
     else { supaPushCatalog(); render(); toast('Datos sincronizados con la nube', '☁️'); }
-  } catch (e) { console.warn(e); supaState = 'err'; supaBadge(); if (!silent) toast('No se pudo conectar con la nube: ' + e.message, '⚠️'); }
+  } catch (e) { console.warn(e); supaState = 'err'; supaBadge(); if (!silent) toast('No se pudo conectar con la nube: ' + e.message, '⚠️'); if (!silent) supaPushCatalog(); }
 }
 let supaCatT = null, supaPubErr = false;
 /* Foto principal del producto (memoria o almacenamiento local) */
@@ -5454,35 +5455,39 @@ function pubFail(e) {
   if (!supaPubErr) { supaPubErr = true; toast('No se pudo publicar en la tienda: ' + String((e && e.message) || e).slice(0, 100) + '. Reintento solo.', '⚠️'); setTimeout(() => { supaPubErr = false; }, 60000); }
   clearTimeout(supaCatT); supaCatT = setTimeout(supaPublish, 10000);
 }
-/* Publica catálogo + fotos nuevas/cambiadas en la nube; la tienda las toma sola */
+/* Publica catálogo + fotos nuevas/cambiadas en la nube; la tienda las toma sola.
+   Primero el catálogo (así el producto sale aunque la foto falle) y después cada foto por separado. */
 async function supaPublish() {
-  if (DBX !== SUPA_DB) return { ok: false, err: 'Sin sesión de nube en este equipo' };
+  if (!SUPA_ON || !SUPA_SES) return { ok: false, err: 'Sin sesión de nube en este equipo' };
   try {
-    const d = JSON.parse(localStorage.getItem('ep_web_inv') || '{}');
+    let d = window.__webInv; if (!d) { try { d = JSON.parse(localStorage.getItem('ep_web_inv') || 'null'); } catch (e) { } }
+    if (!d || !d.items) { v8Sync(); d = window.__webInv; }
+    if (!d || !d.items) throw new Error('No hay inventario para publicar');
+    d = { at: nowISO(), items: d.items };
     let done = {}; try { done = JSON.parse(localStorage.getItem('ep_img_pub') || '{}'); } catch (e) { }
-    const items = d.items || {}; const img = {};
+    const todo = [];
     for (const p of S.products) {
-      const sku = String(p.code || p.id).toUpperCase(), it = items[sku]; if (!it) continue;
-      const raw = pubImgOf(p); if (!raw) { if (done[sku]) { try { await SUPA_DB.doc('public/img/' + sku).delete(); } catch (e) { } delete done[sku]; } continue; }
-      const sig = pubSig(raw); it.imgv = sig;
-      if (done[sku] !== sig) img[sku] = { raw, sig };
+      const sku = String(p.code || p.id).toUpperCase(), it = d.items[sku]; if (!it) continue;
+      const raw = pubImgOf(p); if (!raw) continue;
+      const sig = pubSig(raw); it.imgv = sig; if (done[sku] !== sig) todo.push({ sku, raw, sig });
     }
-    for (const sku of Object.keys(img)) {
-      const small = await pubShrink(img[sku].raw);
-      await SUPA_DB.doc('public/img/' + sku).set({ v: small, sig: img[sku].sig });
-      done[sku] = img[sku].sig; try { localStorage.setItem('ep_img_pub', JSON.stringify(done)); } catch (e) { }
+    await SUPA_DB.doc('public/catalog').set(d);               /* 1) el producto ya queda visible en la tienda */
+    let subidas = 0, falloFoto = '';
+    for (const t of todo) {                                    /* 2) fotos, una por una */
+      try { const small = await pubShrink(t.raw); await SUPA_DB.doc('public/img/' + t.sku).set({ v: small, sig: t.sig }); done[t.sku] = t.sig; subidas++; try { localStorage.setItem('ep_img_pub', JSON.stringify(done)); } catch (e) { } }
+      catch (e) { falloFoto = String((e && e.message) || e); }
     }
-    d.at = nowISO();
-    await SUPA_DB.doc('public/catalog').set(d);
     supaPubErr = false; if (supaState === 'err') { supaState = 'ok'; supaBadge(); }
-    return { ok: true, items: Object.keys(items).length, imgs: Object.keys(img).length };
+    if (falloFoto) { toast('El producto ya está en la tienda, pero una foto no subió: ' + falloFoto.slice(0, 90), '⚠️'); }
+    return { ok: true, items: Object.keys(d.items).length, imgs: subidas, falloFoto };
   } catch (e) { pubFail(e); return { ok: false, err: String((e && e.message) || e) }; }
 }
 function supaPushCatalog() {
-  if (DBX !== SUPA_DB) return; clearTimeout(supaCatT);
+  if (!SUPA_ON || !SUPA_SES) return; clearTimeout(supaCatT);
   supaCatT = setTimeout(supaPublish, 800);
 }
 (function () { const _s = v8Sync; v8Sync = function () { _s(); supaPushCatalog(); }; })();
+(function () { const _sv = save; save = function (...k) { _sv(...k); if (!k.length || k.includes('products')) { clearTimeout(window.__vsT); window.__vsT = setTimeout(() => v8Sync(), 200); } }; })();
 async function supaDiag() {
   const box = document.getElementById('supaDiag'); const say = t => { if (box) box.innerHTML = t; };
   say('⏳ Publicando en la tienda…');
