@@ -5403,11 +5403,21 @@ function supaBadge() {
   if (!b) { b = document.createElement('button'); b.id = 'supaBadge'; b.onclick = supaPanel; const tb = document.querySelector('.topbar .spacer'); if (tb) tb.parentNode.insertBefore(b, tb.nextSibling); else document.body.appendChild(b); }
   const M = { off: ['⚪', 'Nube sin configurar'], login: ['🟠', 'Nube: inicia sesión'], sync: ['🔄', 'Sincronizando…'], ok: ['🟢', 'Nube conectada'], err: ['🔴', 'Nube con error'] };
   b.innerHTML = M[supaState][0] + ' <span>' + M[supaState][1] + '</span>'; b.className = 'supa-b ' + supaState;
+  let bn = document.getElementById('cloudBanner');
+  if (supaState === 'login' || supaState === 'err') {
+    if (!bn) { bn = document.createElement('div'); bn.id = 'cloudBanner'; bn.style.cssText = 'position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:9999;background:#D62F2F;color:#fff;font:600 13px/1.3 system-ui,sans-serif;padding:10px 16px;border-radius:14px;box-shadow:0 8px 24px rgba(0,0,0,.3);display:flex;gap:12px;align-items:center;max-width:94vw'; document.body.appendChild(bn); }
+    bn.innerHTML = '<span>' + (supaState === 'login' ? '⚠️ Este equipo NO está conectado a la nube: los productos no llegan a la tienda ni a otros equipos.' : '⚠️ La nube está fallando: los cambios no se están publicando.') + '</span><button style="border:0;border-radius:9px;padding:7px 12px;font-weight:700;cursor:pointer" onclick="supaPanel()">' + (supaState === 'login' ? 'Conectar' : 'Ver detalle') + '</button>';
+  } else if (bn) bn.remove();
 }
-async function supaStart() {
+async function supaStart(silent) {
   if (!SUPA_ON) { supaState = 'off'; supaBadge(); return; }
-  if (!(await supaToken())) { supaState = 'login'; supaBadge(); return; }
-  supaState = 'sync'; supaBadge();
+  if (!(await supaToken())) {
+    supaState = 'login'; supaBadge();
+    if (!window.__cloudAsked && !silent) { window.__cloudAsked = true; setTimeout(() => { if (!(document.getElementById('modals') || {}).innerText) supaPanel(); }, 900); }
+    return;
+  }
+  if (silent) supaState = supaState === 'err' ? 'err' : 'ok'; else supaState = 'sync'; supaBadge();
+  const before = silent ? JSON.stringify(S.products) + JSON.stringify(S.clients || []) + JSON.stringify(S.kardex || []) : '';
   try {
     if (DBX === SUPA_DB) { clearTimeout(saveTimer); await flush(); }   /* primero sube lo pendiente */
     const rows = await supaReq('GET', '?path=like.store%2F*&select=path,data');
@@ -5417,8 +5427,10 @@ async function supaStart() {
       try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) { }
       DBX = SUPA_DB; await preloadImgs().catch(() => { });
     } else { DBX = SUPA_DB; save(); }
-    supaPushCatalog(); supaState = 'ok'; supaBadge(); render(); toast('Datos sincronizados con la nube', '☁️');
-  } catch (e) { console.warn(e); supaState = 'err'; supaBadge(); toast('No se pudo conectar con la nube: ' + e.message, '⚠️'); }
+    supaState = 'ok'; supaBadge();
+    if (silent) { if (before !== JSON.stringify(S.products) + JSON.stringify(S.clients || []) + JSON.stringify(S.kardex || [])) { render(); toast('Se actualizó con cambios de otro equipo', '☁️'); } }
+    else { supaPushCatalog(); render(); toast('Datos sincronizados con la nube', '☁️'); }
+  } catch (e) { console.warn(e); supaState = 'err'; supaBadge(); if (!silent) toast('No se pudo conectar con la nube: ' + e.message, '⚠️'); }
 }
 let supaCatT = null, supaPubErr = false;
 /* Foto principal del producto (memoria o almacenamiento local) */
@@ -5444,7 +5456,7 @@ function pubFail(e) {
 }
 /* Publica catálogo + fotos nuevas/cambiadas en la nube; la tienda las toma sola */
 async function supaPublish() {
-  if (DBX !== SUPA_DB) return;
+  if (DBX !== SUPA_DB) return { ok: false, err: 'Sin sesión de nube en este equipo' };
   try {
     const d = JSON.parse(localStorage.getItem('ep_web_inv') || '{}');
     let done = {}; try { done = JSON.parse(localStorage.getItem('ep_img_pub') || '{}'); } catch (e) { }
@@ -5463,17 +5475,32 @@ async function supaPublish() {
     d.at = nowISO();
     await SUPA_DB.doc('public/catalog').set(d);
     supaPubErr = false; if (supaState === 'err') { supaState = 'ok'; supaBadge(); }
-  } catch (e) { pubFail(e); }
+    return { ok: true, items: Object.keys(items).length, imgs: Object.keys(img).length };
+  } catch (e) { pubFail(e); return { ok: false, err: String((e && e.message) || e) }; }
 }
 function supaPushCatalog() {
   if (DBX !== SUPA_DB) return; clearTimeout(supaCatT);
   supaCatT = setTimeout(supaPublish, 800);
 }
 (function () { const _s = v8Sync; v8Sync = function () { _s(); supaPushCatalog(); }; })();
+async function supaDiag() {
+  const box = document.getElementById('supaDiag'); const say = t => { if (box) box.innerHTML = t; };
+  say('⏳ Publicando en la tienda…');
+  const pub = await supaPublish();
+  if (!pub.ok) return say('🔴 <b>No se pudo publicar:</b> ' + esc(pub.err) + '<br>Si dice 401/403/42501: falta correr <b>supabase-setup.sql</b> en el SQL Editor de Supabase o cierra sesión de nube y vuelve a conectar. Si dice "Failed to fetch": revisa tu internet.');
+  try {
+    const r = await fetch(SUPA.url + '/rest/v1/ep_store?path=eq.public%2Fcatalog&select=data', { headers: { apikey: SUPA.key, Authorization: 'Bearer ' + SUPA.key }, cache: 'no-store' });
+    if (!r.ok) return say('🔴 Publicado, pero la tienda no puede leerlo (HTTP ' + r.status + '). Falta la política de lectura pública: corre <b>supabase-setup.sql</b>.');
+    const rows = await r.json(); const it = (rows[0] && rows[0].data && rows[0].data.items) || {}; const n = Object.keys(it).length;
+    const mios = S.products.filter(p => !p.inactive).length;
+    const falta = S.products.filter(p => !it[String(p.code || p.id).toUpperCase()]).slice(0, 5).map(p => esc(p.name));
+    say(`🟢 <b>La tienda ya ve ${n} productos</b> (en este equipo: ${mios}). Fotos subidas: ${pub.imgs}.` + (falta.length ? '<br>🟠 Faltan: ' + falta.join(', ') : '<br>✅ Todo coincide. La tienda se actualiza sola cada 20 s; si no ves el cambio, refresca con Ctrl+F5.'));
+  } catch (e) { say('🔴 No se pudo verificar: ' + esc(e.message)); }
+}
 function supaPanel() {
   if (!SUPA_ON) return modal({ title: 'Nube Supabase', em: '☁️', body: `<div class="alertbox y"><span class="em">⚙️</span><div>Falta configurar la URL y la clave pública del proyecto Supabase dentro de <b>admin.html</b> e <b>index.html</b>. Mientras tanto los datos se guardan solo en este navegador.</div></div>`, footer: `<button class="btn" onclick="closeModal()">Entendido</button>` });
-  if (SUPA_SES && supaState !== 'login') return modal({ title: 'Nube conectada', em: '☁️', body: `<div class="alertbox g"><span class="em">🟢</span><div>Sesión: <b>${esc(SUPA_SES.email || '')}</b>. Todo lo que guardes se sube a Supabase y lo ven los demás equipos al abrir el admin.</div></div>`,
-    footer: `<button class="btn" onclick="closeModal();supaStart()">🔄 Sincronizar ahora</button><button class="btn danger" onclick="localStorage.removeItem('ep_supa_session');SUPA_SES=null;DBX=null;closeModal();supaState='login';supaBadge()">Cerrar sesión de nube</button>` });
+  if (SUPA_SES && supaState !== 'login') return modal({ title: supaState === 'err' ? 'Nube con error' : 'Nube conectada', em: '☁️', body: `<div class="alertbox ${supaState === 'err' ? 'r' : 'g'}"><span class="em">${supaState === 'err' ? '🔴' : '🟢'}</span><div>Sesión: <b>${esc(SUPA_SES.email || '')}</b>. Todo lo que guardes se sube a Supabase y lo ven los demás equipos y la tienda.</div></div><div id="supaDiag" class="tiny" style="margin-top:12px;line-height:1.7">Pulsa <b>Probar y publicar ahora</b> para revisar qué ve la tienda.</div>`,
+    footer: `<button class="btn primary" onclick="supaDiag()">🔎 Probar y publicar ahora</button><button class="btn" onclick="closeModal();supaStart()">🔄 Sincronizar ahora</button><button class="btn danger" onclick="localStorage.removeItem('ep_supa_session');SUPA_SES=null;DBX=null;closeModal();supaState='login';supaBadge()">Cerrar sesión de nube</button>` });
   modal({ title: 'Conectar con la nube', em: '☁️', ok: 'Conectar',
     body: `<div class="alertbox b"><span class="em">🔐</span><div>Ingresa con el usuario creado en Supabase (Authentication → Users). Solo se pide una vez por equipo.</div></div>
       <label class="field" style="margin-top:12px"><span>Correo</span><input type="email" name="email" autocomplete="username"></label>
@@ -5486,7 +5513,8 @@ function supaPanel() {
   document.head.appendChild(st);
   const go = () => setTimeout(() => { if (SESSION) supaStart(); }, 700);
   if (window.__efListo) go(); else window.addEventListener('ef:listo', go, { once: true });
-  window.addEventListener('focus', () => { if (supaState === 'ok') supaStart(); });
+  window.addEventListener('focus', () => { if (supaState === 'ok') supaStart(true); });
+  setInterval(() => { if (supaState === 'ok' && SESSION && !dirty.size && !((document.getElementById('modals') || {}).innerText || '').trim() && !/INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || '')) supaStart(true); }, 60000);
 })();
 
 
