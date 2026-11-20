@@ -5148,6 +5148,8 @@ VIEWS.inventario = function () {
         <button title="Eliminar producto" onclick="v8Borrar('${p.id}')">🗑️</button></div></div>`; };
   return `<div class="toolbar" style="margin-bottom:12px"><div class="muted tiny">${nfmt(P.length)} referencias · ${nfmt(units)} unidades</div><div class="spacer"></div>
       <button class="btn" onclick="gestionarCategorias()">🏷️ Categorías</button>
+      <button class="btn" onclick="preciosMasivo()" title="Poner o corregir precios de muchos productos a la vez">💲 Poner precios</button>
+      <button class="btn" onclick="mayoristaPanel()" title="Usuario único para tus clientes mayoristas">🏪 Mayoristas</button>
       <button class="btn primary" onclick="editarProducto()">➕ Nuevo producto</button></div>
     
     <div class="kpis" style="margin-bottom:14px">${kpi('🏷️', 'Referencias', nfmt(P.length), nfmt(units) + ' unidades')}${kpi('💼', 'Inventario a costo', money(vCost), 'costo promedio × stock')}${kpi('💎', 'Inventario a precio público', money(vPrice), 'utilidad potencial ' + money(vPrice - vCost))}${kpi('🚦', 'Requieren atención', nfmt(cnt.agotado + cnt.escaso), cnt.agotado + ' agotados · ' + cnt.escaso + ' por agotarse', cnt.agotado + cnt.escaso ? 'down' : '')}</div>
@@ -5170,6 +5172,82 @@ function v8Borrar(id) {
     onSubmit: () => { S.products = S.products.filter(x => x.id !== id); imgDel(id); (p.colores || []).forEach(c => imgDel(c.k)); typeof audit==='function' && audit('PRODUCTO_ELIMINADO', p.code + ' · ' + p.name); save('products'); v8Sync(); closeModal(); render(); toast('Producto eliminado', '🗑️'); } });
 }
 
+/* ================= MAYORISTAS · un usuario único; la tienda es la misma pero con precio mayorista =================
+   Los precios mayoristas se publican CIFRADOS (AES-GCM, clave = usuario + contraseña). Sin la contraseña no se pueden leer. */
+const MAY_ITER = 150000;
+function toB64(buf) { const u = new Uint8Array(buf); let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); }
+function fromB64(b) { const s = atob(b), u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; }
+async function mayKey(user, pass, salt) {
+  const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(String(user).trim().toLowerCase() + ':' + pass), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: MAY_ITER, hash: 'SHA-256' }, km, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+}
+async function supaWholesale() {
+  const m = S.config.mayorista;
+  if (!m || !m.on || !m.user || !m.pass || !m.salt) { try { await SUPA_DB.doc('public/wholesale').delete(); } catch (e) { } return { n: 0, on: false }; }
+  const sig = m.user + '|' + m.pass + '|' + m.salt; let key = window.__mayKey && window.__mayKey.sig === sig ? window.__mayKey.key : null;
+  if (!key) { key = await mayKey(m.user, m.pass, fromB64(m.salt)); window.__mayKey = { sig, key }; }
+  const prices = {}; S.products.forEach(p => { if (!p.inactive && Number(p.price3) > 0) prices[String(p.code || p.id).toUpperCase()] = Number(p.price3); });
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify({ u: String(m.user).trim().toLowerCase(), prices })));
+  await SUPA_DB.doc('public/wholesale').set({ v: 1, salt: m.salt, iter: MAY_ITER, iv: toB64(iv), ct: toB64(ct) });
+  return { n: Object.keys(prices).length, on: true };
+}
+function mayoristaPanel() {
+  const m = S.config.mayorista || {}, n = S.products.filter(p => !p.inactive && Number(p.price3) > 0).length, link = location.origin + '/?mayorista=1';
+  modal({ title: 'Usuario mayorista', em: '🏪', ok: 'Guardar',
+    body: `<div class="alertbox b"><span class="em">🏪</span><div>Un <b>solo usuario</b> que compartes con todos tus mayoristas. Al entrar con él ven <b>la misma página</b>, pero con el <b>${esc(pLabel('p3'))}</b> que pongas en cada producto (los que no tengan precio mayorista siguen con el precio público).</div></div>
+      <label class="field" style="margin-top:12px"><span>Usuario</span><input type="text" name="muser" value="${esc(m.user || 'mayorista')}" autocomplete="off" placeholder="mayorista"></label>
+      <label class="field"><span>Contraseña <span class="hint">(mínimo 8 caracteres; úsala solo para esto)</span></span><input type="text" name="mpass" value="${esc(m.pass || '')}" autocomplete="off" placeholder="Ej: Mayor-Chaparral-2026"></label>
+      <label class="field" style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="mon" ${m.on !== false ? 'checked' : ''} style="width:auto"> <span>Acceso mayorista activo</span></label>
+      <div class="tiny muted" style="margin:6px 0">Productos con precio mayorista: <b>${n}</b> de ${S.products.filter(p => !p.inactive).length}. Pónlos en cada producto (campo "${esc(pLabel('p3'))}") o con 💲 Poner precios.</div>
+      <div class="alertbox y" style="margin-top:8px"><span class="em">🔗</span><div style="flex:1;word-break:break-all">Enlace para compartir: <b>${esc(link)}</b><br><button class="btn sm" style="margin-top:6px" onclick="navigator.clipboard&&navigator.clipboard.writeText(document.querySelector('#modalBody [name=mshare]').value);toast('Mensaje copiado','📋')">📋 Copiar mensaje para enviar</button></div></div>
+      <input type="hidden" name="mshare" value="">
+      <div class="tiny muted" style="margin-top:6px">Los precios mayoristas se publican cifrados: quien no tenga el usuario y la contraseña no puede verlos. Si cambias la contraseña, los mayoristas deben entrar de nuevo.</div>`,
+    onSubmit: f => {
+      const user = (f.muser || '').trim(), pass = (f.mpass || '').trim();
+      if (!/^[A-Za-z0-9._-]{3,30}$/.test(user)) return toast('Usuario: 3 a 30 letras o números, sin espacios', '⚠️');
+      if (pass.length < 8) return toast('La contraseña debe tener mínimo 8 caracteres', '⚠️');
+      const cambio = !m.salt || m.user !== user || m.pass !== pass;
+      const salt = cambio ? toB64(crypto.getRandomValues(new Uint8Array(16))) : m.salt;
+      S.config.mayorista = { user, pass, on: !!f.mon, salt }; window.__mayKey = null;
+      save('config'); supaPushCatalog(); closeModal(); toast(f.mon ? 'Acceso mayorista guardado y publicado' : 'Acceso mayorista desactivado', '🏪');
+    } });
+  const sh = document.querySelector('#modalBody [name=mshare]');
+  if (sh) sh.value = `Hola, este es el acceso mayorista de TecniFuturo & Tokio Store 🏪\n\n1) Entra a: ${link}\n2) Usuario: ${m.user || 'mayorista'}\n3) Contraseña: ${m.pass || '(la que definas)'}\n\nVerás los mismos productos con precios al por mayor.`;
+}
+
+/* ---------- Precios en bloque: escribe el precio público de muchos productos y se publica en la tienda ---------- */
+function preciosMasivo(todos) {
+  const L = S.products.filter(p => !p.inactive && (todos || !(p.price > 0))).sort((a, b) => String(a.category || '').localeCompare(String(b.category || '')) || String(a.name).localeCompare(String(b.name)));
+  const sin = S.products.filter(p => !p.inactive && !(p.price > 0)).length;
+  modal({ title: todos ? 'Precios de todos los productos' : 'Productos sin precio (' + sin + ')', em: '💲', wide: true, ok: 'Guardar precios',
+    body: `<div class="alertbox b"><span class="em">💡</span><div>Escribe el <b>precio público</b> y, si quieres, el <b>precio mayorista</b> de cada producto (solo números, ej: <b>85000</b>). Los que dejes vacíos no se tocan. Al guardar, la tienda los muestra sola.</div></div>
+      <div style="display:flex;gap:8px;margin:10px 0;flex-wrap:wrap"><input type="search" id="pmQ" placeholder="🔍 Filtrar por nombre, referencia o categoría" style="flex:1;min-width:200px" oninput="pmFiltrar()"><button class="btn sm" onclick="closeModal();preciosMasivo(${todos ? 'false' : 'true'})">${todos ? 'Ver solo los que no tienen precio' : 'Ver todos los productos'}</button></div>
+      <div id="pmList" style="max-height:52vh;overflow:auto;border:1px solid var(--line,#dfe6ee);border-radius:12px">
+        ${L.length ? L.map(p => `<div class="pmRow" data-t="${esc(qNorm(p.name + ' ' + p.code + ' ' + (p.category || '')))}" style="display:grid;grid-template-columns:44px 1fr 120px 120px;gap:10px;align-items:center;padding:8px 10px;border-bottom:1px solid var(--line,#eef2f6)">
+          <div style="width:44px;height:44px;border-radius:8px;background:var(--line-2,#f1f5f9);overflow:hidden;display:grid;place-content:center">${IMG[p.id] || p.imgUrl ? `<img src="${IMG[p.id] || p.imgUrl}" style="width:44px;height:44px;object-fit:cover">` : '📦'}</div>
+          <div style="min-width:0"><div style="font-weight:600;font-size:13px;line-height:1.25">${esc(p.name)}</div><div class="tiny muted">${esc(p.code)} · ${esc(p.category || '')}${p.price > 0 ? ' · actual ' + money(p.price) : ''}</div></div>
+          ${mnyInput('pr_' + p.id, 0, 'placeholder="' + (p.price > 0 ? nfmt(p.price) : 'Público') + '"')}${mnyInput('pm_' + p.id, 0, 'placeholder="' + (p.price3 > 0 ? nfmt(p.price3) : 'Mayorista') + '"')}</div>`).join('') : '<div class="empty" style="padding:30px;text-align:center">✅ Todos los productos ya tienen precio</div>'}</div>
+      <div class="tiny muted" id="pmCount" style="margin-top:8px">${L.length} productos en la lista</div>`,
+    onSubmit: () => {
+      let n = 0;
+      document.querySelectorAll('#modalBody input[name^="pm_"]').forEach(i => {
+        const v = numCO(i.value); if (!(v > 0)) return; const p = S.products.find(x => x.id === i.name.slice(3)); if (!p || p.price3 === v) return;
+        S.priceHistory.unshift({ id: uid('ph'), at: nowISO(), productId: p.id, code: p.code, field: 'price3', from: p.price3 || 0, to: v, who: S.config.user || '' }); p.price3 = v; p.updatedAt = nowISO(); n++;
+      });
+      document.querySelectorAll('#modalBody input[name^="pr_"]').forEach(i => {
+        const v = numCO(i.value); if (!(v > 0)) return; const id = i.name.slice(3), p = S.products.find(x => x.id === id); if (!p || p.price === v) return;
+        S.priceHistory.unshift({ id: uid('ph'), at: nowISO(), productId: p.id, code: p.code, field: 'price', from: p.price || 0, to: v, who: S.config.user || '' }); p.price = v; p.updatedAt = nowISO(); n++;
+      });
+      if (!n) return toast('No escribiste ningún precio', '⚠️');
+      save('products', 'priceHistory'); v8Sync(); closeModal(); render(); toast(n + ' precios guardados · se publican en la tienda', '💲');
+    } });
+}
+function pmFiltrar() {
+  const q = document.getElementById('pmQ').value; let n = 0;
+  document.querySelectorAll('#pmList .pmRow').forEach(r => { const ok = qMatch(r.dataset.t, q); r.style.display = ok ? '' : 'none'; if (ok) n++; });
+  const c = document.getElementById('pmCount'); if (c) c.textContent = n + ' productos en la lista';
+}
 /* ---------- Formulario de producto ---------- */
 let v8Sel = new Set(), v8Off = new Set(), v8Marca = 'iPhone', v8Colors = [], v8Main = null;
 function editarProducto(id) {
@@ -5383,6 +5461,13 @@ function verProducto(id) {
         <button class="btn" onclick="closeModal();v8ToggleAgotado('${p.id}')">${p.agotado ? '♻️ Quitar agotado' : '⛔ Marcar como agotado'}</button>
         <button class="btn danger" onclick="closeModal();v8Borrar('${p.id}')">🗑️ Eliminar producto</button></div>` });
 }
+/* Repara (una sola vez) los productos que se cargaron con precio 0 aunque la lista original traía su precio público */
+function v8PriceFix() {
+  if (!Array.isArray(window.V8_SEED) || !Array.isArray(S.products) || (S.config && S.config.priceFix1)) return 0;
+  const m = {}; V8_SEED.forEach(r => { if (Number(r[3]) > 0) m[String(r[0]).toUpperCase()] = Number(r[3]); });
+  let n = 0; S.products.forEach(p => { const c = String(p.code || '').toUpperCase(); if (m[c] && !(p.price > 0)) { p.price = m[c]; n++; } });
+  S.config = S.config || {}; S.config.priceFix1 = true; return n;
+}
 /* ---------- V9 · Reinicio a cero (una sola vez) + inventario precargado ---------- */
 (function () { try {
   if (localStorage.getItem('ep_reset_v') !== 'z7') {
@@ -5395,12 +5480,12 @@ function verProducto(id) {
   }
   if (!S.products.length && Array.isArray(window.V8_SEED)) {
     V8_SEED.forEach(([code, name, cat, price, stock, img, cols]) => {
-      const p = { id: uid('pr'), code, name, category: cat, cost: 0, price: 0, price2: 0, price3: 0, stock: 1, min: 0, sold: 0, createdAt: nowISO(), supplier: '', imgUrl: img,
+      const p = { id: uid('pr'), code, name, category: cat, cost: 0, price: Number(price) || 0, price2: 0, price3: 0, stock: 1, min: 0, sold: 0, createdAt: nowISO(), supplier: '', imgUrl: img,
         tipo: cat === 'Fundas y Forros' ? 'funda' : 'normal', colores: (cols || []).map((u, i) => ({ n: 'Color ' + (i + 1), url: u })), lots: [] };
       S.products.push(p); if (cat && !(S.config.categorias || []).includes(cat)) S.config.categorias = [...(S.config.categorias || []), cat];
     });
   }
-  S.products.forEach(v8Ensure); save(); v8Sync();
+  S.products.forEach(v8Ensure); v8PriceFix(); save('products', 'config'); save(); v8Sync();
 } catch (e) { console.warn('v9 init', e); } })();
 
 
@@ -5469,7 +5554,7 @@ async function supaStart(silent) {
       rows.forEach(r => { const k = r.path.slice(6); if (!KEYS.includes(k) || !r.data || !('v' in r.data)) return; if (Array.isArray(r.data.v)) { const m = {}; r.data.v.forEach(x => { if (x && x.id != null) m[x.id] = JSON.stringify(x); }); SNAP[k] = m; } if (!dirty.has(k)) S[k] = r.data.v; });   /* no pisa lo que aún no subió */
       S.config = Object.assign({}, DEFAULTS.config, S.config || {}); S.products.forEach(v8Ensure);
       try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) { }
-      DBX = SUPA_DB; KEYS.forEach(k => { if (!SNAP[k]) SNAP[k] = {}; }); await preloadImgs().catch(() => { });
+      DBX = SUPA_DB; KEYS.forEach(k => { if (!SNAP[k]) SNAP[k] = {}; }); if (v8PriceFix()) { save('products', 'config'); v8Sync(); } await preloadImgs().catch(() => { });
     } else { DBX = SUPA_DB; KEYS.forEach(k => { SNAP[k] = {}; }); save(); }
     supaState = 'ok'; supaBadge();
     if (silent) { if (before !== JSON.stringify(S.products) + JSON.stringify(S.clients || []) + JSON.stringify(S.kardex || [])) { render(); toast('Se actualizó con cambios de otro equipo', '☁️'); } }
@@ -5520,9 +5605,10 @@ async function supaPublish() {
       try { const small = await pubShrink(t.raw); await SUPA_DB.doc('public/img/' + t.sku).set({ v: small, sig: t.sig }); done[t.sku] = t.sig; subidas++; try { localStorage.setItem('ep_img_pub', JSON.stringify(done)); } catch (e) { } }
       catch (e) { falloFoto = String((e && e.message) || e); }
     }
+    let may = { n: 0, on: false }; try { may = await supaWholesale(); } catch (e) { toast('Los precios mayoristas no se pudieron publicar: ' + String((e && e.message) || e).slice(0, 80), '⚠️'); }
     supaPubErr = false; if (supaState === 'err') { supaState = 'ok'; supaBadge(); }
     if (falloFoto) { toast('El producto ya está en la tienda, pero una foto no subió: ' + falloFoto.slice(0, 90), '⚠️'); }
-    return { ok: true, items: Object.keys(d.items).length, imgs: subidas, falloFoto };
+    return { ok: true, items: Object.keys(d.items).length, imgs: subidas, falloFoto, may };
   } catch (e) { pubFail(e); return { ok: false, err: String((e && e.message) || e) }; }
 }
 function supaPushCatalog() {
@@ -5542,7 +5628,7 @@ async function supaDiag() {
     const rows = await r.json(); const it = (rows[0] && rows[0].data && rows[0].data.items) || {}; const n = Object.keys(it).length;
     const mios = S.products.filter(p => !p.inactive).length;
     const falta = S.products.filter(p => !it[String(p.code || p.id).toUpperCase()]).slice(0, 5).map(p => esc(p.name));
-    say(`🟢 <b>La tienda ya ve ${n} productos</b> (en este equipo: ${mios}). Fotos subidas: ${pub.imgs}.` + (falta.length ? '<br>🟠 Faltan: ' + falta.join(', ') : '<br>✅ Todo coincide. La tienda se actualiza sola cada 20 s; si no ves el cambio, refresca con Ctrl+F5.'));
+    say(`🟢 <b>La tienda ya ve ${n} productos</b> (en este equipo: ${mios}). Fotos subidas: ${pub.imgs}.` + (pub.may && pub.may.on ? ` 🏪 Mayoristas activos: ${pub.may.n} productos con precio mayorista.` : '') + (falta.length ? '<br>🟠 Faltan: ' + falta.join(', ') : '<br>✅ Todo coincide. La tienda se actualiza sola cada 20 s; si no ves el cambio, refresca con Ctrl+F5.'));
   } catch (e) { say('🔴 No se pudo verificar: ' + esc(e.message)); }
 }
 function supaPanel() {
