@@ -681,13 +681,13 @@ renderFAQ();updateCartUI();updateCatFilter();
 
 
 /* === SUPABASE PUBLIC CATALOG === */
-const SUPA_URL = 'https://ubihlrohxloxwoinbabc.supabase.co';
-const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InViaWhscm9oeGxveHdvaW5iYWJjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMzMTIzNDMsImV4cCI6MjEwODg4ODM0M30.u3z2lT7TFG-KvqLUQBJcHGqzQFssgyP4uVkwpWsKNus';
+const SUPA_URL = 'https://dyjsjhganhrhceskzbdm.supabase.co';
+const SUPA_KEY = 'sb_publishable_mbfck_AP19kmTmFbAZBQHA_5Vb1VuTs';
 let cloudSig = '';
 const skuId = s => { let x = 7; for (let i = 0; i < s.length; i++) x = (x * 33 + s.charCodeAt(i)) >>> 0; return 1795000000000 + x; };
 async function loadCloudCatalog() {
   try {
-    const H = { apikey: SUPA_KEY, Authorization: 'Bearer ' + SUPA_KEY };
+    const H = SUPA_KEY.startsWith('sb_') ? { apikey: SUPA_KEY } : { apikey: SUPA_KEY, Authorization: 'Bearer ' + SUPA_KEY };
     const [r, ri] = await Promise.all([
       fetch(SUPA_URL + '/rest/v1/ep_store?path=eq.public%2Fcatalog&select=data', { headers: H, cache: 'no-store' }),
       fetch(SUPA_URL + '/rest/v1/ep_store?path=like.public%2Fimg%2F*&select=path,data', { headers: H, cache: 'no-store' }).catch(() => null)

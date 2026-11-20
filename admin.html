@@ -5406,7 +5406,7 @@ function verProducto(id) {
 
 /* ================= ADMIN V9 · Nube Supabase ================= */
 /* Pega aquí la URL del proyecto y la "anon public key" (Supabase → Project Settings → API) */
-const SUPA = { url: 'https://ubihlrohxloxwoinbabc.supabase.co', key: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InViaWhscm9oeGxveHdvaW5iYWJjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMzMTIzNDMsImV4cCI6MjEwODg4ODM0M30.u3z2lT7TFG-KvqLUQBJcHGqzQFssgyP4uVkwpWsKNus' };
+const SUPA = { url: 'https://dyjsjhganhrhceskzbdm.supabase.co', key: 'sb_publishable_mbfck_AP19kmTmFbAZBQHA_5Vb1VuTs' };
 const SUPA_ON = /^https:\/\/.+\.supabase\.co$/.test(SUPA.url) && SUPA.key.length > 40;
 let SUPA_SES = null; try { SUPA_SES = JSON.parse(localStorage.getItem('ep_supa_session') || 'null'); } catch (e) { }
 async function supaAuth(body, grant) {
@@ -5537,7 +5537,7 @@ async function supaDiag() {
   const pub = await supaPublish();
   if (!pub.ok) return say('🔴 <b>No se pudo publicar:</b> ' + esc(pub.err) + '<br>Si dice 401/403/42501: falta correr <b>supabase-setup.sql</b> en el SQL Editor de Supabase o cierra sesión de nube y vuelve a conectar. Si dice "Failed to fetch": revisa tu internet.');
   try {
-    const r = await fetch(SUPA.url + '/rest/v1/ep_store?path=eq.public%2Fcatalog&select=data', { headers: { apikey: SUPA.key, Authorization: 'Bearer ' + SUPA.key }, cache: 'no-store' });
+    const r = await fetch(SUPA.url + '/rest/v1/ep_store?path=eq.public%2Fcatalog&select=data', { headers: { apikey: SUPA.key }, cache: 'no-store' });
     if (!r.ok) return say('🔴 Publicado, pero la tienda no puede leerlo (HTTP ' + r.status + '). Falta la política de lectura pública: corre <b>supabase-setup.sql</b>.');
     const rows = await r.json(); const it = (rows[0] && rows[0].data && rows[0].data.items) || {}; const n = Object.keys(it).length;
     const mios = S.products.filter(p => !p.inactive).length;
