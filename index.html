@@ -634,7 +634,7 @@ function openProd(id){const p=products.find(x=>x.id===id);if(!p)return;const isT
 function closeProdModal(){$('prodModal').classList.remove('open')}
 
 /* CART */
-function addToCart(id){const p=products.find(x=>x.id===id);if(!p||p.stock<=0)return;const ex=cart.find(c=>c.id===id);if(ex){if(ex.qty<p.stock)ex.qty++;else{toast('Stock máximo');return}}else cart.push({id,qty:1});saveCart();updateCartUI();toast('✓ Agregado')}
+function addToCart(id){const p=products.find(x=>x.id===id);if(!p||p.stock<=0)return;if(!(p.salePrice||p.price)){toast('Escríbenos por WhatsApp para el precio');return}const ex=cart.find(c=>c.id===id);if(ex){if(ex.qty<p.stock)ex.qty++;else{toast('Stock máximo');return}}else cart.push({id,qty:1});saveCart();updateCartUI();toast('✓ Agregado')}
 function removeFromCart(id){cart=cart.filter(c=>c.id!==id);saveCart();updateCartUI()}
 function changeQty(id,d){const it=cart.find(c=>c.id===id);if(!it)return;const p=products.find(x=>x.id===id);it.qty+=d;if(it.qty<=0)return removeFromCart(id);if(p&&it.qty>p.stock)it.qty=p.stock;saveCart();updateCartUI()}
 function updateCartUI(){const n=cart.reduce((s,c)=>s+c.qty,0);$('cartBadge').textContent=n;const box=$('cartItems');if(!cart.length){box.innerHTML='<div style="text-align:center;padding:32px;color:var(--text3)">🛒 Vacío</div>';$('cartTotal').textContent='$0';$('chkTotal').textContent='$0';return}let total=0;box.innerHTML='';cart.forEach(c=>{const p=products.find(x=>x.id===c.id);if(!p)return;const pr=p.salePrice||p.price;total+=pr*c.qty;box.innerHTML+=`<div class="cart-item"><div class="cart-item-img">${p.image?`<img src="${imgSrc(p.image)}">`:'📦'}</div><div class="cart-item-info"><div class="name">${p.name}</div><div class="pr">${fmt(pr)}</div><div class="cart-item-qty"><button onclick="changeQty(${c.id},-1)">−</button><span>${c.qty}</span><button onclick="changeQty(${c.id},1)">+</button></div></div><button class="cart-item-rm" onclick="removeFromCart(${c.id})">✕</button></div>`});$('cartTotal').textContent=fmt(total);$('chkTotal').textContent=fmt(total)}
@@ -712,10 +712,13 @@ async function loadCloudCatalog() {
             p.hidden = !!it.hidden; if (it.name) p.name = it.name; if (it.cat) p.category = it.cat;
             if (it.desc !== undefined) p.description = it.desc || p.description || '';
             if (im) p.image = im;
+            if (it.brand) p.brand = it.brand; if (it.badge) p.badge = it.badge;
+            p.salePrice = (Number(it.sale) > 0 && Number(it.sale) < p.price) ? Number(it.sale) : null;
           } else if (it.name) {
-            const brand = tkCats.has(it.cat) ? 'tokio' : 'tecnifuturo';
-            products.unshift({ id: skuId(key), brand, name: it.name, price: Number(it.price) || 0, salePrice: null,
-              stock: it.agotado ? 0 : (Number(it.stock) || 0), category: it.cat || 'General', image: im || null, description: it.desc || '', badge: '', sku: key, hidden: !!it.hidden });
+            const brand = it.brand || (tkCats.has(it.cat) ? 'tokio' : 'tecnifuturo');
+            const pr = Number(it.price) || 0;
+            products.unshift({ id: skuId(key), brand, name: it.name, price: pr, salePrice: (Number(it.sale) > 0 && Number(it.sale) < pr) ? Number(it.sale) : null,
+              stock: it.agotado ? 0 : (Number(it.stock) || 0), category: it.cat || 'General', image: im || null, description: it.desc || '', badge: it.badge || '', sku: key, hidden: !!it.hidden });
             if (it.cat && !categories.some(c => c.name === it.cat && c.brand === brand)) categories.push({ name: it.cat, brand });
           }
         });

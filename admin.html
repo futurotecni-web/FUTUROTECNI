@@ -713,10 +713,40 @@ function save(...keys) {
   try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) { }
   clearTimeout(saveTimer); saveTimer = setTimeout(flush, 420);
 }
+/* Fusión entre equipos: cada lista con 'id' se combina elemento por elemento (lo mío si lo cambié, lo de la nube si no) */
+const SNAP = {};
+const listaId = v => Array.isArray(v) && v.length && v.every(x => x && typeof x === 'object' && x.id != null);
+function snapOf(k) { const m = {}; if (Array.isArray(S[k])) S[k].forEach(x => { if (x && x.id != null) m[x.id] = JSON.stringify(x); }); SNAP[k] = m; }
+function mergeLista(k, cloud) {
+  const base = SNAP[k]; if (!base || !Array.isArray(cloud)) return false;
+  const loc = S[k], cm = new Map(cloud.filter(x => x && x.id != null).map(x => [x.id, x])), lm = new Set(loc.map(x => x && x.id));
+  const out = [];
+  loc.forEach(L => {
+    if (!L || L.id == null) { out.push(L); return; }
+    const C = cm.get(L.id), mine = base[L.id] !== JSON.stringify(L);
+    if (C) out.push(mine ? L : C);
+    else if (!(L.id in base) || mine) out.push(L);      /* nuevo o cambiado aquí */
+    /* si estaba en la base, no cambié y ya no está en la nube: lo borró otro equipo */
+  });
+  cloud.forEach(C => { if (C && C.id != null && !lm.has(C.id) && !(C.id in base)) out.push(C); });   /* nuevo en otro equipo */
+  const changed = JSON.stringify(out) !== JSON.stringify(loc); S[k] = out; return changed;
+}
 async function flush() {
   if (!DBX || !dirty.size) { dirty.clear(); return; }
   const ks = [...dirty]; dirty.clear(); let falla = null;
-  for (const k of ks) { try { await DBX.doc('store/' + k).set({ v: S[k], at: nowISO() }); } catch (e) { dirty.add(k); falla = (e && e.message) || String(e); } }
+  let fusionado = false;
+  for (const k of ks) {
+    try {
+      if (DBX === SUPA_DB && SNAP[k] && listaId(S[k])) {
+        const s = await DBX.doc('store/' + k).get();
+        if (s.exists && s.data() && Array.isArray(s.data().v)) { if (mergeLista(k, s.data().v)) fusionado = true; }
+      }
+      await DBX.doc('store/' + k).set({ v: S[k], at: nowISO() });
+      if (Array.isArray(S[k])) snapOf(k);
+      if (k === 'products') { try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) { } }
+    } catch (e) { dirty.add(k); falla = (e && e.message) || String(e); }
+  }
+  if (fusionado) { try { S.products.forEach(v8Ensure); v8Sync(); render(); toast('Se combinaron cambios de otro equipo', '☁️'); } catch (e) { } }
   if (dirty.size) {
     if (typeof supaState !== 'undefined' && DBX === SUPA_DB) { supaState = 'err'; supaBadge(); }
     if (!window.__nubeAviso) { window.__nubeAviso = true; toast('Se guardó en este equipo, pero NO en la nube: ' + String(falla).slice(0, 110) + '. Reintento solo.', '⚠️'); setTimeout(() => { window.__nubeAviso = false; }, 60000); }
@@ -5061,7 +5091,7 @@ function v8Sync() {
     const out = {};
     S.products.forEach(p => {
       out[(p.code || p.id).toUpperCase()] = { id: p.id, name: p.name, cat: p.category, price: p.price || 0, stock: p.agotado ? 0 : (Number(p.stock) || 0),
-        hidden: !!p.webHidden, agotado: !!p.agotado, tipo: p.tipo || 'normal', sub: p.sub || '', modelos: p.modelos || [], colores: (p.colores || []).map(c => ({ n: c.n, k: c.k, url: c.url || '', off: !!c.off })), refs: (p.modelos || []).map(n => ({ m: v8BrandOf(n), n, off: (p.modelosOff || []).includes(n) })), img: p.imgUrl || '', desc: p.desc || '' };
+        hidden: !!p.webHidden, agotado: !!p.agotado, tipo: p.tipo || 'normal', sub: p.sub || '', modelos: p.modelos || [], colores: (p.colores || []).map(c => ({ n: c.n, k: c.k, url: c.url || '', off: !!c.off })), refs: (p.modelos || []).map(n => ({ m: v8BrandOf(n), n, off: (p.modelosOff || []).includes(n) })), img: p.imgUrl || '', desc: p.desc || '', brand: p.webBrand || '', sale: Number(p.webSale) || 0, badge: p.webBadge || '' };
     });
     window.__webInv = { at: nowISO(), items: out };
     try { localStorage.setItem('ep_web_inv', JSON.stringify(window.__webInv)); } catch (e) { }
@@ -5163,7 +5193,7 @@ function editarProducto(id) {
       <div>
         <label class="field"><span>Nombre del producto *</span><input type="text" name="name" value="${esc(p?.name || '')}" oninput="v8AutoRef()" placeholder="Ej: Funda Silicon Case"></label>
         <div class="row c3">
-          <label class="field"><span>Referencia <span class="hint">(automática por el nombre)</span></span><div style="display:flex;gap:6px"><input type="text" name="code" id="v8Ref" value="${esc(p?.code || '')}" oninput="this.dataset.manual=1" style="flex:1"><button class="btn sm" onclick="document.getElementById('v8Ref').dataset.manual='';v8AutoRef(true)" title="Regenerar">🔄</button></div></label>
+          <label class="field"><span>Referencia <span class="hint">(automática al crear; al editar no cambia sola)</span></span><div style="display:flex;gap:6px"><input type="text" name="code" id="v8Ref" value="${esc(p?.code || '')}" data-edit="${p ? 1 : ''}" oninput="this.dataset.manual=1" style="flex:1"><button class="btn sm" onclick="document.getElementById('v8Ref').dataset.manual='';v8AutoRef(true)" title="Regenerar">🔄</button></div></label>
           <label class="field"><span>Categoría</span><input type="text" name="category" list="v8dlCat" value="${esc(val('category', ''))}" placeholder="Escríbela y se crea sola"></label>
           <label class="field"><span>Proveedor</span><input type="text" name="supplier" list="v8dlProv" value="${esc(val('supplier', ''))}"></label></div>
         <datalist id="v8dlCat">${cats.map(c => `<option value="${esc(c)}">`).join('')}</datalist><datalist id="v8dlProv">${provs.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
@@ -5171,6 +5201,10 @@ function editarProducto(id) {
           <label class="field"><span>Tipo de producto</span><select name="tipo" onchange="v8TipoChange(this.value)">${Object.entries(V8_TIPOS).map(([k, t]) => `<option value="${k}" ${tipo === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
           <label class="field" id="v8SubWrap" style="${tipo === 'vidrio' || tipo === 'hidrogel' ? '' : 'display:none'}"><span id="v8SubLbl">${tipo === 'hidrogel' ? 'Tipo de hidrogel' : 'Tipo de vidrio templado'}</span><select name="sub" id="v8Sub">${v8SubOpts(tipo, val('sub', ''))}</select></label>
           <label class="field"><span>Stock mínimo <span class="hint">(alerta semáforo)</span></span><input type="number" name="min" min="0" value="${val('min', 2)}"></label></div>
+        <div class="row c3">
+          <label class="field"><span>Se muestra en la tienda <span class="hint">(web)</span></span><select name="webBrand">${[['', 'Automática (según la categoría)'], ['tecnifuturo', 'TecniFuturo'], ['tokio', 'Tokio Store']].map(([k, t]) => `<option value="${k}" ${(p?.webBrand || '') === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+          <label class="field"><span>Precio en oferta <span class="hint">(web, opcional)</span></span>${mnyInput('webSale', p?.webSale || 0)}</label>
+          <label class="field"><span>Etiqueta en la web</span><select name="webBadge">${['', 'Nuevo', 'Oferta', 'Más vendido', 'Últimas unidades'].map(k => `<option value="${k}" ${(p?.webBadge || '') === k ? 'selected' : ''}>${k || '— ninguna —'}</option>`).join('')}</select></label></div>
       </div></div>
 
     <div class="v8-sec"><h4>💲 Costo y precios <span class="hint" style="font-weight:500">— cambia el % y el precio se actualiza; cambia el precio y el % se recalcula</span></h4>
@@ -5204,10 +5238,10 @@ function editarProducto(id) {
       if (!f.name?.trim()) return toast('Escribe el nombre del producto', '⚠️');
       const cat = (f.category || '').trim() || 'General';
       if (!(S.config.categorias || []).includes(cat)) S.config.categorias = [...(S.config.categorias || []), cat];
-      const code = (f.code || '').trim().toUpperCase() || v8RefFromName(f.name, p?.id);
+      const code = (f.code || '').trim().toUpperCase() || (p && p.code) || v8RefFromName(f.name, p?.id);
       if (S.products.some(x => x.id !== p?.id && String(x.code || '').toUpperCase() === code)) return toast('Esa referencia ya existe, cámbiala', '⚠️');
       const data = { code, name: f.name.trim(), category: cat, supplier: (f.supplier || '').trim(), tipo: f.tipo, sub: (f.tipo === 'vidrio' || f.tipo === 'hidrogel') ? f.sub : '',
-        min: Number(f.min) || 0, cost: f.cost || 0, price: f.price || 0, price2: f.price2 || 0, price3: f.price3 || 0, modelos: [...v8Sel], modelosOff: [...v8Off].filter(x => v8Sel.has(x)), desc: f.desc || '' };
+        min: Number(f.min) || 0, cost: f.cost || 0, price: f.price || 0, price2: f.price2 || 0, price3: f.price3 || 0, modelos: [...v8Sel], modelosOff: [...v8Off].filter(x => v8Sel.has(x)), desc: f.desc || '', webBrand: f.webBrand || '', webSale: Number(f.webSale) || 0, webBadge: f.webBadge || '' };
       let t;
       if (p) {
         ['cost', 'price', 'price2', 'price3'].forEach(k => { if ((p[k] || 0) !== data[k]) S.priceHistory.unshift({ id: uid('ph'), at: nowISO(), productId: p.id, code: p.code, field: k, from: p[k] || 0, to: data[k], who: S.config.user || '' }); });
@@ -5234,7 +5268,7 @@ function v8SoltarOpciones() { S.config.v8Last = null; save('config'); const m = 
   const t = m.querySelector('[name=tipo]'); if (t) { t.value = 'normal'; v8TipoChange('normal'); } const fo = m.querySelector('[name=fondo]'); if (fo) fo.value = 'inventario'; document.getElementById('v8LastBox')?.remove(); toast('Opciones soltadas', '📌'); }
 function v8SubOpts(tipo, sel) { const L = tipo === 'hidrogel' ? V8_HIDROGEL : V8_VIDRIO; return L.map(x => `<option ${x === sel ? 'selected' : ''}>${x}</option>`).join(''); }
 function v8TipoChange(t) { const w = document.getElementById('v8SubWrap'); if (!w) return; w.style.display = (t === 'vidrio' || t === 'hidrogel') ? '' : 'none'; document.getElementById('v8SubLbl').textContent = t === 'hidrogel' ? 'Tipo de hidrogel' : 'Tipo de vidrio templado'; document.getElementById('v8Sub').innerHTML = v8SubOpts(t, ''); }
-function v8AutoRef(force) { const r = document.getElementById('v8Ref'); if (!r || (r.dataset.manual && !force)) return; const n = document.querySelector('#modalBody [name=name]')?.value || ''; r.value = v8RefFromName(n, null); }
+function v8AutoRef(force) { const r = document.getElementById('v8Ref'); if (!r || (r.dataset.edit && !force) || (r.dataset.manual && !force)) return; const n = document.querySelector('#modalBody [name=name]')?.value || ''; r.value = v8RefFromName(n, null); }
 function v8Val(id) { const e = document.getElementById(id); return e ? numCO(e.value) : 0; }
 function v8SetMny(id, v) { const e = document.getElementById(id); if (e) { e.value = v ? nfmt(v) : ''; e.dataset.v = v; } }
 function v8OnPct(uk, pk) { const c = v8Val('v8Cost'), pct = parseFloat(document.getElementById('v8' + uk).value); if (!c || isNaN(pct)) return; v8SetMny('v8' + pk, v8R100(c * (1 + pct / 100))); }
@@ -5376,9 +5410,18 @@ const SUPA = { url: 'https://ubihlrohxloxwoinbabc.supabase.co', key: 'eyJhbGciOi
 const SUPA_ON = /^https:\/\/.+\.supabase\.co$/.test(SUPA.url) && SUPA.key.length > 40;
 let SUPA_SES = null; try { SUPA_SES = JSON.parse(localStorage.getItem('ep_supa_session') || 'null'); } catch (e) { }
 async function supaAuth(body, grant) {
-  const r = await fetch(SUPA.url + '/auth/v1/token?grant_type=' + grant, { method: 'POST', headers: { apikey: SUPA.key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const ac = new AbortController(), tm = setTimeout(() => ac.abort(), 15000); let r;
+  try { r = await fetch(SUPA.url + '/auth/v1/token?grant_type=' + grant, { method: 'POST', signal: ac.signal, headers: { apikey: SUPA.key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); }
+  catch (e) { throw new Error(e && e.name === 'AbortError' ? 'Supabase no respondió en 15 s. Revisa tu internet y que el proyecto no esté pausado.' : 'No se pudo comunicar con Supabase (' + ((e && e.message) || e) + '). Revisa tu internet.'); }
+  finally { clearTimeout(tm); }
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error_description || j.msg || 'Correo o contraseña incorrectos');
+  if (!r.ok) {
+    const m = String(j.error_description || j.msg || j.message || j.error || ''), l = m.toLowerCase();
+    throw new Error(/invalid login|invalid_grant|invalid credentials/.test(l) ? 'Correo o contraseña NO coinciden con el usuario creado en Supabase (Authentication → Users). Revisa que el correo sea exacto y que la contraseña sea la misma que le pusiste allí.'
+      : /not confirmed/.test(l) ? 'El usuario existe pero no está confirmado. En Supabase → Authentication → Users abre el usuario y confirma el correo (o bórralo y créalo con "Auto Confirm User").'
+      : /disabled|not allowed/.test(l) ? 'Supabase tiene desactivado el ingreso con correo. Actívalo en Authentication → Providers → Email.'
+      : ('Supabase respondió ' + r.status + ': ' + (m || 'sin detalle')));
+  }
   SUPA_SES = { at: j.access_token, rt: j.refresh_token, exp: Date.now() + ((j.expires_in || 3600) - 60) * 1000, email: j.user && j.user.email };
   localStorage.setItem('ep_supa_session', JSON.stringify(SUPA_SES)); return SUPA_SES;
 }
@@ -5423,11 +5466,11 @@ async function supaStart(silent) {
     if (DBX === SUPA_DB) { clearTimeout(saveTimer); await flush(); }   /* primero sube lo pendiente */
     const rows = await supaReq('GET', '?path=like.store%2F*&select=path,data');
     if (rows.length) {
-      rows.forEach(r => { const k = r.path.slice(6); if (KEYS.includes(k) && !dirty.has(k) && r.data && 'v' in r.data) S[k] = r.data.v; });   /* no pisa lo que aún no subió */
+      rows.forEach(r => { const k = r.path.slice(6); if (!KEYS.includes(k) || !r.data || !('v' in r.data)) return; if (Array.isArray(r.data.v)) { const m = {}; r.data.v.forEach(x => { if (x && x.id != null) m[x.id] = JSON.stringify(x); }); SNAP[k] = m; } if (!dirty.has(k)) S[k] = r.data.v; });   /* no pisa lo que aún no subió */
       S.config = Object.assign({}, DEFAULTS.config, S.config || {}); S.products.forEach(v8Ensure);
       try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) { }
-      DBX = SUPA_DB; await preloadImgs().catch(() => { });
-    } else { DBX = SUPA_DB; save(); }
+      DBX = SUPA_DB; KEYS.forEach(k => { if (!SNAP[k]) SNAP[k] = {}; }); await preloadImgs().catch(() => { });
+    } else { DBX = SUPA_DB; KEYS.forEach(k => { SNAP[k] = {}; }); save(); }
     supaState = 'ok'; supaBadge();
     if (silent) { if (before !== JSON.stringify(S.products) + JSON.stringify(S.clients || []) + JSON.stringify(S.kardex || [])) { render(); toast('Se actualizó con cambios de otro equipo', '☁️'); } }
     else { supaPushCatalog(); render(); toast('Datos sincronizados con la nube', '☁️'); }
@@ -5509,8 +5552,16 @@ function supaPanel() {
   modal({ title: 'Conectar con la nube', em: '☁️', ok: 'Conectar',
     body: `<div class="alertbox b"><span class="em">🔐</span><div>Ingresa con el usuario creado en Supabase (Authentication → Users). Solo se pide una vez por equipo.</div></div>
       <label class="field" style="margin-top:12px"><span>Correo</span><input type="email" name="email" autocomplete="username"></label>
-      <label class="field"><span>Contraseña</span><input type="password" name="pass" autocomplete="current-password" onkeydown="if(event.key==='Enter')submitModal()"></label>`,
-    onSubmit: async f => { try { await supaAuth({ email: (f.email || '').trim(), password: f.pass || '' }, 'password'); closeModal(); supaStart(); } catch (e) { toast(e.message, '🚫'); } } });
+      <label class="field"><span>Contraseña</span><input type="password" name="pass" autocomplete="current-password" onkeydown="if(event.key==='Enter')submitModal()"></label>
+      <div id="supaMsg" class="alertbox r" style="display:none;margin-top:10px"></div>`,
+    onSubmit: async f => {
+      const m = document.getElementById('supaMsg'), btn = document.querySelector('#modals .btn.primary');
+      const say = (t, ok) => { if (m) { m.style.display = t ? 'flex' : 'none'; m.className = 'alertbox ' + (ok ? 'b' : 'r'); m.innerHTML = '<span class="em">' + (ok ? '⏳' : '🚫') + '</span><div style="flex:1">' + esc(t) + '</div>'; } };
+      if (!(f.email || '').trim() || !f.pass) return say('Escribe el correo y la contraseña.');
+      say('Conectando con Supabase…', true); if (btn) { btn.disabled = true; btn.textContent = 'Conectando…'; }
+      try { await supaAuth({ email: (f.email || '').trim(), password: f.pass || '' }, 'password'); closeModal(); supaStart(); }
+      catch (e) { say(e.message); toast('No se pudo conectar: ' + e.message.slice(0, 80), '🚫'); if (btn) { btn.disabled = false; btn.textContent = 'Conectar'; } }
+    } });
 }
 (function () {
   const st = document.createElement('style');
