@@ -485,7 +485,10 @@ const mnyInput = (name, val = 0, extra = '') =>
 
 /* ===== Búsqueda en vivo: coincide por fragmentos, sin tildes, en cualquier orden ===== */
 function qNorm(s) { return String(s == null ? '' : s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
-function qMatch(text, q) { const toks = qNorm(q).split(/[\s,;]+/).filter(Boolean); if (!toks.length) return true; const t = qNorm(text); return toks.every(k => t.includes(k)); }
+var _qWC = new Map();
+function qLev(a, b, max) { if (Math.abs(a.length - b.length) > max) return max + 1; let prev = []; for (let j = 0; j <= b.length; j++) prev[j] = j; for (let i = 1; i <= a.length; i++) { const cur = [i]; let mn = i; for (let j = 1; j <= b.length; j++) { const v = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); cur[j] = v; if (v < mn) mn = v; } if (mn > max) return max + 1; prev = cur; } return prev[b.length]; }
+function qFuzzy(k, t) { const tol = k.length >= 8 ? 2 : k.length >= 4 ? 1 : 0; if (!tol) return false; let ws = _qWC.get(t); if (!ws) { ws = t.replace(/[^a-z0-9ñ]+/g, ' ').split(' ').filter(w => w.length >= 3); if (_qWC.size > 4000) _qWC.clear(); _qWC.set(t, ws); } for (const w of ws) { if (qLev(k, w, tol) <= tol || (w.length > k.length && qLev(k, w.slice(0, k.length), tol) <= tol)) return true; } if (k.length >= 4 && k.slice(-1) === 's' && t.includes(k.slice(0, -1))) return true; return false; }
+function qMatch(text, q) { const toks = qNorm(q).split(/[\s,;]+/).filter(Boolean); if (!toks.length) return true; const t = qNorm(text); return toks.every(k => t.includes(k) || qFuzzy(k, t)); }
 function qRank(text, q) { const toks = qNorm(q).split(/[\s,;]+/).filter(Boolean); const t = ' ' + qNorm(text).replace(/[^a-z0-9ñ]+/g, ' '); return toks.every(k => t.includes(' ' + k)) ? 0 : 1; }
 let _rqT = null; function renderQ() { clearTimeout(_rqT); _rqT = setTimeout(() => render(), 90); }
 const uid = p => p + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -598,6 +601,7 @@ const MENU_DEF = [
   { id: 'reportes', label: 'Reportes', em: '📈', on: true },
   { id: 'config', label: 'Configuración', em: '⚙️', on: true, fixed: true }
 ];
+MENU_DEF.splice(MENU_DEF.findIndex(m => m.id === 'inventario') + 1, 0, { id: 'mayoweb', label: 'Tienda Mayorista (web)', em: '🏪', on: true });
 const DEFAULTS = {
   config: {
     biz: 'TecniFuturo & Tokio Store', sub: 'Tecnología · Anime · Servicio técnico', nit: '', tel: '3132405175', dir: 'Calle 10 N° 6-13, esquina del indio', ciudad: 'Chaparral, Tolima',
@@ -682,6 +686,7 @@ async function initStore() {
   MENU_DEF.forEach(d => { if (!cur.find(m => m.id === d.id)) { const ci = cur.findIndex(m => m.id === 'config'); if (ci >= 0) cur.splice(ci, 0, { ...d }); else cur.push({ ...d }); } });
   S.config.menu = cur.filter(m => MENU_DEF.find(d => d.id === m.id))
     .map(m => ({ ...MENU_DEF.find(d => d.id === m.id), ...m }));
+  if (!S.config.mayoMenu) { const mi = S.config.menu.findIndex(m => m.id === 'mayoweb'), ii = S.config.menu.findIndex(m => m.id === 'inventario'); if (mi >= 0 && ii >= 0 && mi !== ii + 1) { const [x] = S.config.menu.splice(mi, 1); S.config.menu.splice(S.config.menu.findIndex(m => m.id === 'inventario') + 1, 0, x); } S.config.menu.forEach(m => { if (m.id === 'mayoweb') m.on = true; }); S.config.mayoMenu = true; }
   if (!S.config.categorias?.length) S.config.categorias = [...new Set(S.products.map(p => p.category).filter(Boolean))];
   S.config.theme = { ...DEFAULTS.config.theme, ...(S.config.theme || {}) };
   applyTheme();
@@ -5216,6 +5221,23 @@ function mayoristaPanel() {
   if (sh) sh.value = `Hola, este es el acceso mayorista de TecniFuturo & Tokio Store 🏪\n\n1) Entra a: ${link}\n2) Usuario: ${m.user || 'mayorista'}\n3) Contraseña: ${m.pass || '(la que definas)'}\n\nVerás los mismos productos con precios al por mayor.`;
 }
 
+VIEWS.mayoweb = () => {
+  const m = S.config.mayorista || {}, act = S.products.filter(p => !p.inactive), con = act.filter(p => Number(p.price3) > 0).length, link = location.origin + '/?mayorista=1';
+  const on = m.on && m.user && m.pass;
+  return `<div class="card"><div class="card-h"><h3>🏪 Tienda Mayorista (web)</h3><span class="chip ${on ? 'ok' : ''}" style="margin-left:auto">${on ? '🟢 Activa' : '⚪ Sin configurar'}</span></div><div class="card-b">
+    <p class="muted" style="margin-bottom:14px">Un <b>solo usuario</b> que compartes con todos tus mayoristas. Entran a <b>la misma página web</b> y ven el <b>${esc(pLabel('p3'))}</b> que tengas en cada producto.</p>
+    <div class="kpis" style="margin-bottom:14px">
+      <div class="kpi"><div class="lab"><span class="em">👤</span>Usuario</div><div class="val" style="font-size:20px">${esc(m.user || '—')}</div><div class="sub">${m.pass ? 'contraseña definida' : 'sin contraseña'}</div></div>
+      <div class="kpi"><div class="lab"><span class="em">💲</span>Con precio mayorista</div><div class="val">${nfmt(con)}</div><div class="sub">de ${nfmt(act.length)} productos</div></div>
+      <div class="kpi"><div class="lab"><span class="em">⚠️</span>Sin precio mayorista</div><div class="val">${nfmt(act.length - con)}</div><div class="sub">verán el precio público</div></div></div>
+    <div class="alertbox y" style="margin-bottom:14px"><span class="em">🔗</span><div style="word-break:break-all">Enlace para tus mayoristas: <b>${esc(link)}</b></div></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn primary" onclick="mayoristaPanel()">🔑 ${on ? 'Cambiar usuario y contraseña' : 'Crear usuario y contraseña'}</button>
+      <button class="btn" onclick="preciosMasivo(true)">💲 Poner precios mayoristas</button>
+      ${on ? `<button class="btn" onclick="navigator.clipboard&&navigator.clipboard.writeText('Hola, este es el acceso mayorista de TecniFuturo & Tokio Store 🏪\\n\\n1) Entra a: ${esc(link)}\\n2) Usuario: ${esc(m.user)}\\n3) Contraseña: ${esc(m.pass)}\\n\\nVerás los mismos productos con precios al por mayor.');toast('Mensaje copiado','📋')">📋 Copiar mensaje para enviar</button>` : ''}
+    </div>
+    <div class="tiny muted" style="margin-top:14px">Los precios mayoristas se publican cifrados: solo se pueden leer con el usuario y la contraseña. Si cambias la contraseña, los mayoristas deben entrar de nuevo.</div></div></div>`;
+};
 /* ---------- Precios en bloque: escribe el precio público de muchos productos y se publica en la tienda ---------- */
 function preciosMasivo(todos) {
   const L = S.products.filter(p => !p.inactive && (todos || !(p.price > 0))).sort((a, b) => String(a.category || '').localeCompare(String(b.category || '')) || String(a.name).localeCompare(String(b.name)));
